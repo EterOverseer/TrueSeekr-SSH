@@ -1,0 +1,746 @@
+package com.example.ui.screens
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cable
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.ScreenshotMonitor
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.BuildConfig
+import com.example.domain.AppAccentPreset
+import com.example.domain.AppThemeMode
+import com.example.domain.TerminalCursorStyle
+import com.example.domain.TerminalFontFamily
+import com.example.domain.TerminalThemePreset
+import com.example.security.BiometricLockManager
+import com.example.settings.AutoLockTimeout
+import com.example.settings.SettingsViewModel
+import com.example.ui.components.BannerTone
+import com.example.ui.components.ObsidianMetadataTag
+import com.example.ui.components.ObsidianSectionHeader
+import com.example.ui.components.ObsidianStatusBanner
+import com.example.ui.components.ObsidianSurfaceCard
+import com.example.ui.theme.LocalObsidianColors
+import com.example.ui.theme.MonoCodeStyle
+import com.example.ui.theme.ObsidianRadius
+import com.example.ui.theme.ObsidianSpacing
+import kotlin.math.roundToInt
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+fun SettingsScreen(
+    viewModel: SettingsViewModel
+) {
+    val colors = LocalObsidianColors.current
+    val context = LocalContext.current
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val knownHosts by viewModel.knownHosts.collectAsStateWithLifecycle()
+    val vaultCount by viewModel.vaultCount.collectAsStateWithLifecycle()
+    val feedback by viewModel.feedbackMessage.collectAsStateWithLifecycle()
+
+    val biometricSupported = remember(context) { BiometricLockManager.canAuthenticateBiometric(context) }
+    var showPinSetupDialog by remember { mutableStateOf(false) }
+    var showLicensesDialog by remember { mutableStateOf(false) }
+    var showSecurityArchDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshVaultCount()
+    }
+
+    Scaffold(
+        containerColor = colors.background,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("ตั้งค่าและความปลอดภัย", style = MaterialTheme.typography.titleLarge, color = colors.textPrimary)
+                        Text(
+                            text = "Obsidian Aurora Command Center Preferences",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.textSecondary
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.background)
+            )
+        }
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            if (!feedback.isNullOrBlank()) {
+                item {
+                    ObsidianStatusBanner(
+                        message = feedback!!,
+                        tone = BannerTone.INFO,
+                        onDismiss = { viewModel.clearFeedback() }
+                    )
+                }
+            }
+
+            // 1. APPEARANCE
+            item {
+                ObsidianSectionHeader(
+                    title = "รูปลักษณ์และธีม (Appearance)",
+                    icon = Icons.Default.Palette,
+                    accentColor = colors.cyan
+                )
+            }
+            item {
+                ObsidianSurfaceCard(elevated = true) {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("โหมดการแสดงผล", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            AppThemeMode.entries.forEach { mode ->
+                                FilterChip(
+                                    selected = settings.themeMode == mode,
+                                    onClick = { viewModel.setThemeMode(mode) },
+                                    label = { Text(mode.label) },
+                                    modifier = Modifier.testTag("settings_theme_mode_${mode.name}")
+                                )
+                            }
+                        }
+
+                        Text("สีเน้นหลัก (Accent Color)", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            AppAccentPreset.entries.forEach { preset ->
+                                val swatchColor = Color(preset.primaryArgb)
+                                val selected = settings.accentPreset == preset
+                                Surface(
+                                    onClick = { viewModel.setAccentPreset(preset) },
+                                    color = if (selected) swatchColor.copy(alpha = 0.16f) else colors.elevated,
+                                    shape = RoundedCornerShape(ObsidianRadius.md),
+                                    border = BorderStroke(1.dp, if (selected) swatchColor else colors.border),
+                                    modifier = Modifier.testTag("settings_accent_${preset.name}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(12.dp)
+                                                .clip(CircleShape)
+                                                .background(swatchColor)
+                                        )
+                                        Text(
+                                            text = preset.label,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = if (selected) swatchColor else colors.textPrimary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Text("ธีมเทอร์มินัลเริ่มต้น", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TerminalThemePreset.entries.forEach { theme ->
+                                FilterChip(
+                                    selected = settings.defaultTerminalTheme == theme,
+                                    onClick = { viewModel.setDefaultTheme(theme) },
+                                    label = { Text(theme.displayName) }
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = "ขนาดตัวอักษรเริ่มต้น: ${settings.defaultTerminalFontSizeSp.roundToInt()} sp",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = colors.textPrimary
+                        )
+                        Slider(
+                            value = settings.defaultTerminalFontSizeSp,
+                            onValueChange = { viewModel.setDefaultFontSize(it) },
+                            valueRange = 10f..22f
+                        )
+
+                        Text("ฟอนต์เทอร์มินัล", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TerminalFontFamily.entries.forEach { family ->
+                                FilterChip(
+                                    selected = settings.terminalFontFamily == family,
+                                    onClick = { viewModel.setTerminalFontFamily(family) },
+                                    label = { Text(family.label) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. TERMINAL
+            item {
+                ObsidianSectionHeader(
+                    title = "เทอร์มินัลและคีย์บอร์ด (Terminal)",
+                    icon = Icons.Default.Terminal,
+                    accentColor = colors.lime
+                )
+            }
+            item {
+                ObsidianSurfaceCard {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("ขนาด Scrollback Buffer (Search History)", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(500, 2000, 5000, 10000).forEach { lines ->
+                                FilterChip(
+                                    selected = settings.scrollbackLines == lines,
+                                    onClick = { viewModel.setScrollbackLines(lines) },
+                                    label = { Text("$lines บรรทัด") }
+                                )
+                            }
+                        }
+
+                        Text("รูปแบบเคอร์เซอร์ที่ต้องการ", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TerminalCursorStyle.entries.forEach { style ->
+                                FilterChip(
+                                    selected = settings.cursorStyle == style,
+                                    onClick = { viewModel.setCursorStyle(style) },
+                                    label = { Text(style.label) }
+                                )
+                            }
+                        }
+
+                        Text("ค่า TERM เริ่มต้น", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("xterm-256color", "vt100", "screen-256color").forEach { term ->
+                                FilterChip(
+                                    selected = settings.defaultTermType == term,
+                                    onClick = { viewModel.setDefaultTermType(term) },
+                                    label = { Text(term) }
+                                )
+                            }
+                        }
+
+                        SettingsSwitchRow(
+                            title = "แสดงแถบปุ่มลัดคีย์บอร์ด (ESC / TAB / CTRL / Fn)",
+                            subtitle = "แถบคำสั่งเสริมเหนือคีย์บอร์ดสำหรับงาน DevOps",
+                            checked = settings.showExtraKeyboardToolbar,
+                            onCheckedChange = { viewModel.setShowExtraKeyboardToolbar(it) }
+                        )
+                        SettingsSwitchRow(
+                            title = "การสั่นเบาเมื่อกดปุ่มลัดเทอร์มินัล (Haptic)",
+                            subtitle = "ตอบสนองสัมผัสเมื่อกด ESC, CTRL, ALT หรือ Arrows",
+                            checked = settings.hapticKeyFeedback,
+                            onCheckedChange = { viewModel.setHapticKeyFeedback(it) }
+                        )
+                    }
+                }
+            }
+
+            // 3. SECURITY
+            item {
+                ObsidianSectionHeader(
+                    title = "ความปลอดภัยและห้องนิรภัย (Security)",
+                    icon = Icons.Default.Security,
+                    accentColor = colors.amber
+                )
+            }
+            item {
+                ObsidianSurfaceCard {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Lock, null, tint = colors.cyan)
+                            Text("การล็อกแอปและ Biometric", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                        }
+                        Text(
+                            text = "Biometric / PIN ใช้สำหรับป้องกันข้อมูล Local Vault บนเครื่องเท่านั้น ไม่แทนการยืนยันตัวตนกับ SSH Server",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.textSecondary
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("เปิดใช้งาน App Lock (PIN)", style = MaterialTheme.typography.bodyMedium, color = colors.textPrimary)
+                                Text(
+                                    text = if (settings.hasPinConfigured) "ตั้งค่า PIN แล้ว" else "ยังไม่ได้ตั้ง PIN",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.textSecondary
+                                )
+                            }
+                            Switch(
+                                checked = settings.appLockEnabled,
+                                onCheckedChange = { enabled ->
+                                    if (enabled && !settings.hasPinConfigured) {
+                                        showPinSetupDialog = true
+                                    } else {
+                                        viewModel.setAppLockEnabled(enabled)
+                                    }
+                                },
+                                modifier = Modifier.testTag("settings_applock_switch")
+                            )
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { showPinSetupDialog = true },
+                                modifier = Modifier.height(48.dp)
+                            ) {
+                                Text(if (settings.hasPinConfigured) "เปลี่ยน PIN" else "ตั้งค่า PIN")
+                            }
+                            if (settings.hasPinConfigured) {
+                                TextButton(
+                                    onClick = { viewModel.disablePinAndAppLock() },
+                                    modifier = Modifier.height(48.dp)
+                                ) {
+                                    Text("ลบ PIN", color = colors.red)
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.Fingerprint, null, tint = colors.lime)
+                                Column {
+                                    Text("สแกนลายนิ้วมือ / ใบหน้า", style = MaterialTheme.typography.bodyMedium, color = colors.textPrimary)
+                                    Text(
+                                        text = if (biometricSupported) "อุปกรณ์รองรับ BiometricPrompt" else "อุปกรณ์ไม่ได้ตั้งค่า Biometric",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.textSecondary
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = settings.biometricEnabled,
+                                enabled = biometricSupported && settings.hasPinConfigured,
+                                onCheckedChange = { viewModel.setBiometricEnabled(it) }
+                            )
+                        }
+
+                        Text("ล็อกอัตโนมัติเมื่อสลับแอป", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            AutoLockTimeout.entries.forEach { timeout ->
+                                FilterChip(
+                                    selected = settings.autoLockTimeout == timeout,
+                                    onClick = { viewModel.setAutoLockTimeout(timeout) },
+                                    label = { Text(timeout.label) }
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.ScreenshotMonitor, null, tint = colors.textSecondary)
+                                Column {
+                                    Text("ป้องกันภาพหน้าจอ (FLAG_SECURE)", style = MaterialTheme.typography.bodyMedium, color = colors.textPrimary)
+                                    Text(
+                                        "ซ่อนหน้าจอใน Recent Tasks และบล็อก Screenshot / Screen Streaming",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.textSecondary
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = settings.protectScreenshots,
+                                onCheckedChange = { viewModel.setProtectScreenshots(it) }
+                            )
+                        }
+
+                        HorizontalDivider(color = colors.subtleBorder)
+
+                        // Keystore Vault
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Key, null, tint = colors.lime)
+                            Text("Android Keystore Vault", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                        }
+                        Text(
+                            text = "จัดเก็บรหัสผ่านและ Private Key แบบเข้ารหัส AES-256-GCM ($vaultCount รายการที่เข้ารหัสอยู่) แยกออกจาก Metadata และปิด Auto Backup",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.textSecondary
+                        )
+                        OutlinedButton(
+                            onClick = { viewModel.cleanOrphanedCredentials() },
+                            modifier = Modifier.height(48.dp)
+                        ) {
+                            Text("ล้าง Credential ที่ไม่มีโปรไฟล์อ้างอิง")
+                        }
+
+                        HorizontalDivider(color = colors.subtleBorder)
+
+                        // Trusted Hosts
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Default.VerifiedUser, null, tint = colors.cyan)
+                                Text("Trusted SSH Hosts (${knownHosts.size})", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                            }
+                            if (knownHosts.isNotEmpty()) {
+                                TextButton(onClick = { viewModel.clearAllKnownHosts() }) {
+                                    Text("ล้างทั้งหมด", color = colors.red)
+                                }
+                            }
+                        }
+                        if (knownHosts.isEmpty()) {
+                            Text(
+                                text = "ยังไม่มี Host Key ที่เชื่อถือ (ระบบจะถามยืนยัน SHA-256 Fingerprint ทุกครั้งเมื่อเชื่อมต่อโฮสต์ใหม่)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textSecondary
+                            )
+                        } else {
+                            knownHosts.forEach { host ->
+                                Surface(
+                                    color = colors.elevated,
+                                    shape = RoundedCornerShape(ObsidianRadius.md),
+                                    border = BorderStroke(1.dp, colors.subtleBorder),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("${host.host}:${host.port} (${host.keyType})", style = MonoCodeStyle, color = colors.textPrimary)
+                                            Text(
+                                                host.sha256Fingerprint,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = colors.cyan
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { viewModel.removeKnownHost(host.id) },
+                                            modifier = Modifier.testTag("revoke_host_${host.id}")
+                                        ) {
+                                            Icon(Icons.Default.Delete, contentDescription = "ยกเลิกความเชื่อถือ", tint = colors.red)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. CONNECTIONS
+            item {
+                ObsidianSectionHeader(
+                    title = "การเชื่อมต่อและเครือข่าย (Connections)",
+                    icon = Icons.Default.Cable,
+                    accentColor = colors.cyan
+                )
+            }
+            item {
+                ObsidianSurfaceCard {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("Handshake Timeout เริ่มต้น", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(10, 15, 30, 60).forEach { sec ->
+                                FilterChip(
+                                    selected = settings.defaultConnectTimeoutSec == sec,
+                                    onClick = { viewModel.setDefaultConnectTimeoutSec(sec) },
+                                    label = { Text("${sec}s") }
+                                )
+                            }
+                        }
+
+                        Text("Keepalive Interval เริ่มต้น", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(0, 15, 30, 60).forEach { sec ->
+                                FilterChip(
+                                    selected = settings.defaultKeepAliveSec == sec,
+                                    onClick = { viewModel.setDefaultKeepAlive(sec) },
+                                    label = { Text(if (sec == 0) "ปิด" else "${sec}s") }
+                                )
+                            }
+                        }
+
+                        SettingsSwitchRow(
+                            title = "แจ้งเตือน Reconnect เมื่อเครือข่ายสลับเส้นทาง",
+                            subtitle = "เตือนเมื่อ Wi-Fi / Cellular / Tailscale VPN เปลี่ยนแปลง",
+                            checked = settings.autoReconnectPrompt,
+                            onCheckedChange = { viewModel.setAutoReconnectPrompt(it) }
+                        )
+
+                        HorizontalDivider(color = colors.subtleBorder)
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Hub, null, tint = colors.cyan)
+                            Text("การเชื่อมต่อ LAN / VPN / Tailscale", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                        }
+                        Text(
+                            text = "PocketSSH รองรับการเชื่อมต่อผ่าน LAN, Wi-Fi, VPN และ Tailscale โดยใช้แอป Tailscale อย่างเป็นทางการบน Android เป็น VPN Provider สามารถระบุ Tailnet IP (100.x.y.z) หรือชื่อ MagicDNS ได้โดยตรง",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.textSecondary
+                        )
+                    }
+                }
+            }
+
+            // 5. ABOUT
+            item {
+                ObsidianSectionHeader(
+                    title = "เกี่ยวกับ PocketSSH (About)",
+                    icon = Icons.Default.Info,
+                    accentColor = colors.textSecondary
+                )
+            }
+            item {
+                ObsidianSurfaceCard {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text("PocketSSH Native Client", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                                Text(
+                                    text = "cbssh 0.6.9 • termlib 0.1.0 • Keystore Vault",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.textSecondary
+                                )
+                            }
+                            ObsidianMetadataTag(text = "v${BuildConfig.VERSION_NAME}", tint = colors.cyan, monospace = true)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { showSecurityArchDialog = true },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                            ) {
+                                Icon(Icons.Default.Shield, null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("สถาปัตยกรรมความปลอดภัย", maxLines = 1)
+                            }
+                            OutlinedButton(
+                                onClick = { showLicensesDialog = true },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                            ) {
+                                Icon(Icons.Default.Gavel, null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("ใบอนุญาต", maxLines = 1)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showPinSetupDialog) {
+        var pin1 by remember { mutableStateOf("") }
+        var pin2 by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showPinSetupDialog = false },
+            containerColor = colors.surface,
+            title = { Text("ตั้งค่า PIN สำหรับ App Lock") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = pin1,
+                        onValueChange = { if (it.length <= 12) pin1 = it.filter(Char::isDigit) },
+                        label = { Text("รหัส PIN (อย่างน้อย 4 หลัก)") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
+                    OutlinedTextField(
+                        value = pin2,
+                        onValueChange = { if (it.length <= 12) pin2 = it.filter(Char::isDigit) },
+                        label = { Text("ยืนยัน PIN อีกครั้ง") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.setPin(pin1)
+                        showPinSetupDialog = false
+                    },
+                    enabled = pin1.length >= 4 && pin1 == pin2
+                ) { Text("บันทึก PIN") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPinSetupDialog = false }) { Text("ยกเลิก") }
+            }
+        )
+    }
+
+    if (showSecurityArchDialog) {
+        AlertDialog(
+            onDismissRequest = { showSecurityArchDialog = false },
+            containerColor = colors.surface,
+            title = { Text("สถาปัตยกรรมความปลอดภัย PocketSSH") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("• Strict Host Key Verification (TOFU + MITM Detection): บันทึก SHA-256 Fingerprint ใน Room และปฏิเสธทันทีหาก Key เปลี่ยนแปลง", style = MaterialTheme.typography.bodySmall)
+                    Text("• Credential Isolation: รหัสผ่านและ Private Key ถูกเข้ารหัส AES-256-GCM ผ่าน Android Keystore แยกจาก Profile Metadata", style = MaterialTheme.typography.bodySmall)
+                    Text("• Ephemeral Passphrase: Passphrase ของ Private Key เก็บในหน่วยความจำเท่านั้น และล้างอัตโนมัติเมื่อแอปถูกล็อก", style = MaterialTheme.typography.bodySmall)
+                    Text("• Android Auto Backup ถูกปิด (allowBackup=false) เพื่อป้องกันกุญแจรั่วไหลไปยัง Cloud Backup", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showSecurityArchDialog = false }) { Text("ปิด") }
+            }
+        )
+    }
+
+    if (showLicensesDialog) {
+        AlertDialog(
+            onDismissRequest = { showLicensesDialog = false },
+            containerColor = colors.surface,
+            title = { Text("ไลบรารีและใบอนุญาต") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("• ConnectBot cbssh (org.connectbot.sshlib:sshlib:0.6.9) — Apache License 2.0", style = MaterialTheme.typography.bodySmall)
+                    Text("• ConnectBot termlib (org.connectbot:termlib:0.1.0) — Apache License 2.0", style = MaterialTheme.typography.bodySmall)
+                    Text("• libvterm (bundled inside termlib) — MIT License", style = MaterialTheme.typography.bodySmall)
+                    Text("• AndroidX Jetpack Compose, Room, DataStore, Navigation, Biometric — Apache License 2.0", style = MaterialTheme.typography.bodySmall)
+                    Text("• Kotlinx Coroutines & Serialization — Apache License 2.0", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLicensesDialog = false }) { Text("ปิด") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SettingsSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val colors = LocalObsidianColors.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.textPrimary)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = colors.textSecondary)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
