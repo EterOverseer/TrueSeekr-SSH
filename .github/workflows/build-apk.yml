@@ -1,0 +1,41 @@
+name: Build APK
+
+# รันเมื่อมีการ push ทุก branch หรือกดรันเองจากหน้า Actions
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Android SDK มีติดมากับ runner อยู่แล้ว ต้องลงแค่ Java
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # repo นี้ไม่มี gradlew จึงติดตั้ง Gradle ตามเวอร์ชันที่ gradle-wrapper.properties กำหนด
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.3.1
+
+      # build.gradle.kts เซ็น debug ด้วย ${rootDir}/debug.keystore ซึ่งอยู่ใน .gitignore
+      # จึงสร้างคีย์ debug ชั่วคราวขึ้นมาในรอบ build (ค่าตรงกับที่ build.gradle.kts กำหนด)
+      - name: Create debug keystore
+        run: |
+          keytool -genkeypair -v -keystore debug.keystore \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
