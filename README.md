@@ -132,7 +132,10 @@ gradle :app:lintDebug           # Android Lint
 
 ### Build with GitHub Actions
 
-`.github/workflows/build-apk.yml` builds a debug APK on every push. Open the run in the **Actions** tab and download the **`app-debug`** artifact. The workflow creates the debug keystore for you.
+`.github/workflows/build-apk.yml` builds a debug APK on every push and creates the debug keystore for you.
+
+- **Releases page:** every push to `main` refreshes the `latest-build` pre-release with the newest `PocketSSH-debug.apk`. Pushing a tag such as `v1.0.0` publishes a regular release with that name.
+- **Actions artifacts:** any run (including branches) also attaches the APK as the **`app-debug`** artifact, under the run's **Actions** tab.
 
 > Each CI run generates a fresh debug key, so APKs from different runs have different signatures. Uninstall the previous build before installing a new one.
 
