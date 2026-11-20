@@ -1,5 +1,5 @@
 {
-  "name": "PocketSSH",
+  "name": "TrueSeekrSSH",
   "description": "Secure native Android SSH client with persistent profiles, real interactive terminal, SFTP file manager, and Keystore credential protection.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

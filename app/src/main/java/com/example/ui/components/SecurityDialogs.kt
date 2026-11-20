@@ -444,13 +444,13 @@ fun AppLockOverlay(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Lock,
-                        contentDescription = "PocketSSH ถูกล็อก",
+                        contentDescription = "TrueSeekrSSH ถูกล็อก",
                         tint = colors.cyan,
                         modifier = Modifier.size(32.dp)
                     )
                 }
                 Text(
-                    text = "PocketSSH ถูกล็อก",
+                    text = "TrueSeekrSSH ถูกล็อก",
                     style = MaterialTheme.typography.headlineSmall,
                     color = colors.textPrimary
                 )

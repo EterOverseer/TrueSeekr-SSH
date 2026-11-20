@@ -577,7 +577,7 @@ fun SettingsScreen(
                             Text("การเชื่อมต่อ LAN / VPN / Tailscale", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
                         }
                         Text(
-                            text = "PocketSSH รองรับการเชื่อมต่อผ่าน LAN, Wi-Fi, VPN และ Tailscale โดยใช้แอป Tailscale อย่างเป็นทางการบน Android เป็น VPN Provider สามารถระบุ Tailnet IP (100.x.y.z) หรือชื่อ MagicDNS ได้โดยตรง",
+                            text = "TrueSeekrSSH รองรับการเชื่อมต่อผ่าน LAN, Wi-Fi, VPN และ Tailscale โดยใช้แอป Tailscale อย่างเป็นทางการบน Android เป็น VPN Provider สามารถระบุ Tailnet IP (100.x.y.z) หรือชื่อ MagicDNS ได้โดยตรง",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.textSecondary
                         )
@@ -588,7 +588,7 @@ fun SettingsScreen(
             // 5. ABOUT
             item {
                 ObsidianSectionHeader(
-                    title = "เกี่ยวกับ PocketSSH (About)",
+                    title = "เกี่ยวกับ TrueSeekrSSH (About)",
                     icon = Icons.Default.Info,
                     accentColor = colors.textSecondary
                 )
@@ -605,7 +605,7 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column {
-                                Text("PocketSSH Native Client", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                                Text("TrueSeekrSSH Native Client", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
                                 Text(
                                     text = "cbssh 0.6.9 • termlib 0.1.0 • Keystore Vault",
                                     style = MaterialTheme.typography.bodySmall,
@@ -688,7 +688,7 @@ fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { showSecurityArchDialog = false },
             containerColor = colors.surface,
-            title = { Text("สถาปัตยกรรมความปลอดภัย PocketSSH") },
+            title = { Text("สถาปัตยกรรมความปลอดภัย TrueSeekrSSH") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("• Strict Host Key Verification (TOFU + MITM Detection): บันทึก SHA-256 Fingerprint ใน Room และปฏิเสธทันทีหาก Key เปลี่ยนแปลง", style = MaterialTheme.typography.bodySmall)

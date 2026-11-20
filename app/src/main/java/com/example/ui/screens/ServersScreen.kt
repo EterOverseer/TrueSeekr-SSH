@@ -143,18 +143,6 @@ fun ServersScreen(
     var pendingExportPayload by remember { mutableStateOf<String?>(null) }
     var importedRawText by remember { mutableStateOf<String?>(null) }
 
-    // Live ticker only when at least one session is CONNECTED so active uptime stays accurate
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    val hasConnectedSession = remember(uiState.activeSessions) {
-        uiState.activeSessions.any { it.status == SessionStatus.CONNECTED }
-    }
-    LaunchedEffect(hasConnectedSession) {
-        while (hasConnectedSession) {
-            nowMs = System.currentTimeMillis()
-            delay(1000L)
-        }
-    }
-
     val exportSafLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri: Uri? ->
@@ -282,7 +270,6 @@ fun ServersScreen(
                         uiState.trustedHostKeys.containsKey("${session.profile.host.trim().lowercase()}:${session.profile.port}")
                     ActiveSessionCard(
                         session = session,
-                        nowMs = nowMs,
                         isHostTrusted = hostTrusted,
                         onOpenTerminal = { viewModel.selectActiveSession(session.sessionId, onNavigateToTerminal) },
                         onReconnect = { viewModel.reconnectActiveSession(session.sessionId, onNavigateToTerminal) }
@@ -847,7 +834,7 @@ private fun CommandCenterHeader(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "PocketSSH",
+                        text = "TrueSeekrSSH",
                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                         color = colors.textPrimary
                     )
@@ -951,13 +938,21 @@ private fun CommandCenterHeader(
 @Composable
 private fun ActiveSessionCard(
     session: ManagedSessionUiState,
-    nowMs: Long,
     isHostTrusted: Boolean,
     onOpenTerminal: () -> Unit,
     onReconnect: () -> Unit
 ) {
     val colors = LocalObsidianColors.current
     val isConnected = session.status == SessionStatus.CONNECTED
+    var nowMs by remember(isConnected, session.connectedAtMs) {
+        mutableLongStateOf(System.currentTimeMillis())
+    }
+    LaunchedEffect(isConnected, session.connectedAtMs) {
+        while (isConnected && session.connectedAtMs != null) {
+            nowMs = System.currentTimeMillis()
+            delay(1000L)
+        }
+    }
     val accent = when {
         isConnected -> colors.lime.copy(alpha = 0.45f)
         session.status == SessionStatus.ERROR -> colors.red.copy(alpha = 0.45f)

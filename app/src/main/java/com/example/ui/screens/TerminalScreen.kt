@@ -140,14 +140,6 @@ fun TerminalScreen(
     var showDashboardSheet by remember { mutableStateOf(false) }
     var snippetConfirmTarget by remember { mutableStateOf<CommandSnippet?>(null) }
 
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(activeSession?.sessionId, activeSession?.status) {
-        while (true) {
-            nowMs = System.currentTimeMillis()
-            delay(1000L)
-        }
-    }
-
     val monoTypeface = remember(context, appSettings.terminalFontFamily) {
         when (appSettings.terminalFontFamily) {
             TerminalFontFamily.JETBRAINS_MONO ->
@@ -249,115 +241,116 @@ fun TerminalScreen(
                     }
                 }
 
-                // Active Session Status + Quick Actions
+                // Active Session Status + Horizontal Uptime & Host Info Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 10.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ConnectionStatusPill(status = activeSession.status, compact = true)
+                    if (activeSession.status == SessionStatus.CONNECTED && activeSession.connectedAtMs != null) {
+                        TerminalUptimeText(
+                            connectedAtMs = activeSession.connectedAtMs,
+                            color = colors.lime
+                        )
+                    }
+                    if (activeSession.latencyMs != null) {
+                        Text(
+                            text = "${activeSession.latencyMs}ms",
+                            style = MonoCodeStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+                            color = colors.cyan,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)
+                    ) {
+                        Text(
+                            text = "${activeSession.profile.username}@${activeSession.profile.host}:${activeSession.profile.port}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.textSecondary,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (activeSession.meta.hostFingerprint.isNotBlank()) {
+                            Icon(
+                                imageVector = Icons.Default.VerifiedUser,
+                                contentDescription = "Host Key Verified",
+                                tint = colors.cyan,
+                                modifier = Modifier.size(13.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Quick Terminal Action Toolbar Row (uncramped full-width horizontal strip)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    IconButton(
+                        onClick = {
+                            showDashboardSheet = true
+                            viewModel.loadServerMetrics(activeSession.sessionId)
+                        },
+                        modifier = Modifier.testTag("terminal_dashboard_button")
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            ConnectionStatusPill(status = activeSession.status, compact = true)
-                            if (activeSession.status == SessionStatus.CONNECTED && activeSession.connectedAtMs != null) {
-                                Text(
-                                    text = Formatters.formatDuration(nowMs - activeSession.connectedAtMs),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.lime
-                                )
-                            }
-                            if (activeSession.latencyMs != null) {
-                                Text(
-                                    text = "${activeSession.latencyMs}ms",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.cyan
-                                )
-                            }
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = "${activeSession.profile.username}@${activeSession.profile.host}:${activeSession.profile.port}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.textSecondary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            if (activeSession.meta.hostFingerprint.isNotBlank()) {
-                                Icon(
-                                    imageVector = Icons.Default.VerifiedUser,
-                                    contentDescription = "Host Key Verified",
-                                    tint = colors.cyan,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                            }
-                        }
+                        Icon(Icons.Default.MonitorHeart, contentDescription = "ข้อมูลเซิร์ฟเวอร์ (Dashboard)", tint = colors.cyan)
                     }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-                        IconButton(
-                            onClick = {
-                                showDashboardSheet = true
-                                viewModel.loadServerMetrics(activeSession.sessionId)
-                            },
-                            modifier = Modifier.testTag("terminal_dashboard_button")
-                        ) {
-                            Icon(Icons.Default.MonitorHeart, contentDescription = "ข้อมูลเซิร์ฟเวอร์ (Dashboard)", tint = colors.cyan)
-                        }
-                        IconButton(
-                            onClick = { showSnippetsSheet = true },
-                            modifier = Modifier.testTag("terminal_snippets_button")
-                        ) {
-                            Icon(Icons.Default.Code, contentDescription = "Command Snippets")
-                        }
-                        IconButton(
-                            onClick = { viewModel.toggleSearch() },
-                            modifier = Modifier.testTag("terminal_search_toggle")
-                        ) {
-                            Icon(Icons.Default.Search, contentDescription = "ค้นหาผลลัพธ์เทอร์มินัล")
-                        }
-                        IconButton(onClick = {
-                            val selected = handle.selectionController?.copySelection()
-                            val textToCopy = if (!selected.isNullOrEmpty()) {
-                                selected
-                            } else {
-                                handle.scrollbackBuffer.getAllLines().takeLast(20).joinToString("\n")
-                            }
-                            copyToClipboard(context, textToCopy)
-                        }) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = "คัดลอก")
-                        }
-                        IconButton(onClick = {
-                            pasteFromClipboard(context)?.let { text ->
-                                handle.insertTextWithoutExecuting(text)
-                            }
-                        }) {
-                            Icon(Icons.Default.ContentPaste, contentDescription = "วาง")
-                        }
-                        if (activeSession.status == SessionStatus.CONNECTED) {
-                            IconButton(
-                                onClick = { viewModel.disconnect(activeSession.sessionId) },
-                                modifier = Modifier.testTag("terminal_disconnect_button")
-                            ) {
-                                Icon(Icons.Default.LinkOff, contentDescription = "ตัดการเชื่อมต่อ", tint = colors.amber)
-                            }
+                    IconButton(
+                        onClick = { showSnippetsSheet = true },
+                        modifier = Modifier.testTag("terminal_snippets_button")
+                    ) {
+                        Icon(Icons.Default.Code, contentDescription = "Command Snippets")
+                    }
+                    IconButton(
+                        onClick = { viewModel.toggleSearch() },
+                        modifier = Modifier.testTag("terminal_search_toggle")
+                    ) {
+                        Icon(Icons.Default.Search, contentDescription = "ค้นหาผลลัพธ์เทอร์มินัล")
+                    }
+                    IconButton(onClick = {
+                        val selected = handle.selectionController?.copySelection()
+                        val textToCopy = if (!selected.isNullOrEmpty()) {
+                            selected
                         } else {
-                            IconButton(
-                                onClick = { viewModel.reconnect(activeSession.sessionId) },
-                                modifier = Modifier.testTag("terminal_reconnect_button")
-                            ) {
-                                Icon(Icons.Default.Refresh, contentDescription = "เชื่อมต่อใหม่", tint = colors.cyan)
-                            }
+                            handle.scrollbackBuffer.getAllLines().takeLast(20).joinToString("\n")
+                        }
+                        copyToClipboard(context, textToCopy)
+                    }) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "คัดลอก")
+                    }
+                    IconButton(onClick = {
+                        pasteFromClipboard(context)?.let { text ->
+                            handle.insertTextWithoutExecuting(text)
+                        }
+                    }) {
+                        Icon(Icons.Default.ContentPaste, contentDescription = "วาง")
+                    }
+                    if (activeSession.status == SessionStatus.CONNECTED) {
+                        IconButton(
+                            onClick = { viewModel.disconnect(activeSession.sessionId) },
+                            modifier = Modifier.testTag("terminal_disconnect_button")
+                        ) {
+                            Icon(Icons.Default.LinkOff, contentDescription = "ตัดการเชื่อมต่อ", tint = colors.amber)
+                        }
+                    } else {
+                        IconButton(
+                            onClick = { viewModel.reconnect(activeSession.sessionId) },
+                            modifier = Modifier.testTag("terminal_reconnect_button")
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "เชื่อมต่อใหม่", tint = colors.cyan)
                         }
                     }
                 }
@@ -651,7 +644,6 @@ fun TerminalScreen(
         ServerDashboardSheet(
             session = activeSession,
             metricsState = metricsState,
-            nowMs = nowMs,
             onRefresh = { viewModel.loadServerMetrics(activeSession.sessionId) },
             onDismiss = { showDashboardSheet = false }
         )
@@ -864,11 +856,17 @@ private fun SnippetsBottomSheet(
 private fun ServerDashboardSheet(
     session: ManagedSessionUiState,
     metricsState: MetricsLoadState,
-    nowMs: Long,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val colors = LocalObsidianColors.current
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1000L)
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = colors.surface
@@ -1094,10 +1092,31 @@ private fun ServerDashboardSheet(
     }
 }
 
+@Composable
+private fun TerminalUptimeText(
+    connectedAtMs: Long,
+    color: androidx.compose.ui.graphics.Color
+) {
+    var nowMs by remember(connectedAtMs) { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(connectedAtMs) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1000L)
+        }
+    }
+    Text(
+        text = Formatters.formatDuration(nowMs - connectedAtMs),
+        style = MonoCodeStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
+        color = color,
+        maxLines = 1,
+        softWrap = false
+    )
+}
+
 private fun copyToClipboard(context: Context, text: String) {
     if (text.isEmpty()) return
     val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    cb.setPrimaryClip(ClipData.newPlainText("PocketSSH", text))
+    cb.setPrimaryClip(ClipData.newPlainText("TrueSeekrSSH", text))
 }
 
 private fun pasteFromClipboard(context: Context): String? {

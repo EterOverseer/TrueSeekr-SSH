@@ -99,7 +99,17 @@ class SshSessionManager(
     private val _credentialPrompt = MutableStateFlow<CredentialPromptRequest?>(null)
     val credentialPrompt: StateFlow<CredentialPromptRequest?> = _credentialPrompt.asStateFlow()
 
+    @Volatile
+    private var cachedScrollbackLines: Int = 2000
+
     init {
+        preferencesRepository?.let { repo ->
+            scope.launch {
+                repo.settings.collect { s ->
+                    cachedScrollbackLines = s.scrollbackLines
+                }
+            }
+        }
         scope.launch {
             networkMonitor.networkTransitions.collect { status ->
                 if (!status.isConnected) {
@@ -675,9 +685,7 @@ class SshSessionManager(
             return existing.sessionId
         }
 
-        val configuredScrollback = runCatching {
-            kotlinx.coroutines.runBlocking { preferencesRepository?.settings?.first()?.scrollbackLines ?: 2000 }
-        }.getOrDefault(2000)
+        val configuredScrollback = cachedScrollbackLines
 
         val sessionId = UUID.randomUUID().toString()
         lateinit var runtime: ManagedSessionRuntime

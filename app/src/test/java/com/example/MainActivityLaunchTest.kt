@@ -24,7 +24,7 @@ class MainActivityLaunchTest {
     @Test
     fun mainActivity_launchesWithoutFlagSecure_andRendersServersAndNavigationTabs() {
         activityRule.waitUntil(timeoutMillis = 5000L) {
-            activityRule.onAllNodesWithText("PocketSSH").fetchSemanticsNodes().isNotEmpty()
+            activityRule.onAllNodesWithText("TrueSeekrSSH").fetchSemanticsNodes().isNotEmpty()
         }
 
         // Verify FLAG_SECURE is disabled by default so emulator/streamed displays render visibly
@@ -32,7 +32,7 @@ class MainActivityLaunchTest {
         assertEquals(0, flags and WindowManager.LayoutParams.FLAG_SECURE)
 
         // Verify primary home screen renders visibly
-        activityRule.onNodeWithText("PocketSSH").assertIsDisplayed()
+        activityRule.onNodeWithText("TrueSeekrSSH").assertIsDisplayed()
         activityRule.onNodeWithTag("add_profile_fab").assertIsDisplayed()
 
         // Navigate across tabs to confirm full UI renders without blank screens

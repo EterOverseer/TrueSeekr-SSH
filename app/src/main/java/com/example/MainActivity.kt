@@ -4,6 +4,8 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -258,10 +260,13 @@ private fun PocketSshRoot(
     }
 
     val navigateToTop = { route: Any ->
-        navController.navigate(route) {
-            popUpTo(ServersRoute) { saveState = true }
-            launchSingleTop = true
-            restoreState = true
+        val targetRouteName = route::class.qualifiedName
+        if (currentRoute != targetRouteName) {
+            navController.navigate(route) {
+                popUpTo(ServersRoute) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
         }
     }
 
@@ -362,7 +367,11 @@ private fun PocketSshRoot(
                 Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                     NavHost(
                         navController = navController,
-                        startDestination = ServersRoute
+                        startDestination = ServersRoute,
+                        enterTransition = { EnterTransition.None },
+                        exitTransition = { ExitTransition.None },
+                        popEnterTransition = { EnterTransition.None },
+                        popExitTransition = { ExitTransition.None }
                     ) {
                         composable<ServersRoute> {
                             ServersScreen(
@@ -453,7 +462,7 @@ private fun PocketSshRoot(
                 onRequestBiometric = {
                     BiometricLockManager.authenticate(
                         activity = activity,
-                        title = "ปลดล็อก PocketSSH",
+                        title = "ปลดล็อก TrueSeekrSSH",
                         subtitle = "ยืนยันตัวตนเพื่อเข้าถึงโปรไฟล์และ Keystore Vault",
                         negativeButtonText = "ใช้ PIN",
                         onSuccess = {
