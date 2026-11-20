@@ -43,12 +43,16 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.EnhancedEncryption
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.ImportExport
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -123,15 +127,24 @@ import com.example.security.ExportBackupPreview
 import com.example.security.ImportDuplicateStrategy
 import com.example.security.ImportPreviewSummary
 import com.example.ssh.ManagedSessionUiState
+import com.example.ui.components.BackupExportImportDialog
 import com.example.ui.components.BannerTone
 import com.example.ui.components.ConnectionStatusPill
+import com.example.ui.components.CreateEncryptedBackupDialog
+import com.example.ui.components.DecryptBackupPassphraseDialog
+import com.example.ui.components.ExportProfilesDialog
 import com.example.ui.components.HostTrustIndicator
+import com.example.ui.components.ImportErrorDialog
+import com.example.ui.components.ImportFileMode
+import com.example.ui.components.ImportPreviewDialog
 import com.example.ui.components.ObsidianEmptyState
 import com.example.ui.components.ObsidianMetadataTag
 import com.example.ui.components.ObsidianSectionHeader
 import com.example.ui.components.ObsidianStatusBanner
 import com.example.ui.components.ObsidianSurfaceCard
 import com.example.ui.components.OverviewMetricTile
+import com.example.ui.components.readBackupTextFromUri
+import com.example.ui.components.writeBackupTextToUri
 import com.example.ui.theme.LocalObsidianColors
 import com.example.ui.theme.MonoCodeStyle
 import com.example.ui.theme.ObsidianRadius
@@ -152,15 +165,19 @@ fun ServersScreen(
     val context = LocalContext.current
 
     var sortMenuExpanded by remember { mutableStateOf(false) }
+    var overflowMenuExpanded by remember { mutableStateOf(false) }
     var showGroupDialog by remember { mutableStateOf(false) }
     var showBackupDialog by remember { mutableStateOf(false) }
+    var showExportProfilesDialog by remember { mutableStateOf(false) }
+    var showCreateEncryptedBackupDialog by remember { mutableStateOf(false) }
     var exportTargetProfileIds by remember { mutableStateOf<Set<String>?>(null) }
     var actionSheetProfile by remember { mutableStateOf<SshProfile?>(null) }
     var profileForDetails by remember { mutableStateOf<SshProfile?>(null) }
     var profileToDuplicate by remember { mutableStateOf<SshProfile?>(null) }
     var profileToRename by remember { mutableStateOf<SshProfile?>(null) }
     var profileToMoveGroup by remember { mutableStateOf<SshProfile?>(null) }
-    var pendingExportPayload by remember { mutableStateOf<String?>(null) }
+    var pendingExportPayload by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    var pendingImportMode by remember { mutableStateOf(ImportFileMode.ANY_SUPPORTED) }
     var importedRawText by remember { mutableStateOf<String?>(null) }
 
     val pendingImportReview by viewModel.pendingImportReview.collectAsState()
@@ -173,14 +190,23 @@ fun ServersScreen(
     val exportSafLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("*/*")
     ) { uri: Uri? ->
-        val payload = pendingExportPayload
+        val pending = pendingExportPayload
         pendingExportPayload = null
-        if (uri != null && payload != null) {
-            runCatching {
-                context.contentResolver.openOutputStream(uri)?.use { out ->
-                    out.write(payload.toByteArray(Charsets.UTF_8))
+        if (uri != null && pending != null) {
+            val (payload, isEncrypted) = pending
+            writeBackupTextToUri(context, uri, payload)
+                .onSuccess {
+                    viewModel.postMessageBanner(
+                        if (isEncrypted) {
+                            "บันทึกไฟล์สำรองเข้ารหัส (.tsshbackup) เรียบร้อยแล้ว"
+                        } else {
+                            "ส่งออกโปรไฟล์ (JSON) เรียบร้อยแล้ว"
+                        }
+                    )
                 }
-            }
+                .onFailure { err ->
+                    viewModel.postErrorBanner(err.message ?: "ไม่สามารถบันทึกไฟล์สำรองข้อมูลได้")
+                }
         }
     }
 
@@ -189,32 +215,23 @@ fun ServersScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             importParseError = null
-            runCatching {
-                val stream = context.contentResolver.openInputStream(uri)
-                val raw = stream?.use { input ->
-                    val bytes = input.readBytes()
-                    if (bytes.size > BackupCryptoManager.MAX_BACKUP_BYTES) {
-                        error("ไฟล์สำรองมีขนาดใหญ่เกิน 10 MB")
-                    }
-                    String(bytes, Charsets.UTF_8)
-                }
-                raw
-            }.onSuccess { text ->
-                if (!text.isNullOrBlank()) {
-                    if (BackupCryptoManager.isEncryptedBackup(text)) {
+            readBackupTextFromUri(context, uri)
+                .onSuccess { text ->
+                    val isEncrypted = BackupCryptoManager.isEncryptedBackup(text)
+                    if (pendingImportMode == ImportFileMode.ENCRYPTED_ONLY && !isEncrypted) {
+                        importParseError = "ไฟล์ที่เลือกไม่ใช่ไฟล์สำรองแบบเข้ารหัส (.tsshbackup) กรุณาใช้เมนู Import Profiles สำหรับไฟล์ JSON"
+                    } else if (isEncrypted) {
                         importedRawText = text
                     } else {
-                        val res = viewModel.prepareImportPreview(text, null)
+                        val res = viewModel.prepareImportPreview(text, null, requireEncrypted = false)
                         if (res is BackupImportResult.Error) {
                             importParseError = res.message
                         }
                     }
-                } else {
-                    importParseError = "ไฟล์สำรองข้อมูลว่างเปล่าหรือไม่สามารถอ่านได้"
                 }
-            }.onFailure { err ->
-                importParseError = err.message ?: "ไม่สามารถเปิดไฟล์สำรองข้อมูลได้"
-            }
+                .onFailure { err ->
+                    importParseError = err.message ?: "ไม่สามารถเปิดไฟล์สำรองข้อมูลได้"
+                }
         }
     }
 
@@ -284,11 +301,30 @@ fun ServersScreen(
                     sortMenuExpanded = sortMenuExpanded,
                     onSortExpandedChange = { sortMenuExpanded = it },
                     onSelectSortOrder = { viewModel.setSortOrder(it) },
+                    overflowMenuExpanded = overflowMenuExpanded,
+                    onOverflowExpandedChange = { overflowMenuExpanded = it },
                     onOpenGroups = { showGroupDialog = true },
                     onOpenBackup = {
                         exportTargetProfileIds = null
                         showBackupDialog = true
                     },
+                    onImportProfiles = {
+                        pendingImportMode = ImportFileMode.ANY_SUPPORTED
+                        importSafLauncher.launch(arrayOf("*/*"))
+                    },
+                    onExportProfiles = {
+                        exportTargetProfileIds = null
+                        showExportProfilesDialog = true
+                    },
+                    onCreateEncryptedBackup = {
+                        exportTargetProfileIds = null
+                        showCreateEncryptedBackupDialog = true
+                    },
+                    onRestoreEncryptedBackup = {
+                        pendingImportMode = ImportFileMode.ENCRYPTED_ONLY
+                        importSafLauncher.launch(arrayOf("*/*"))
+                    },
+                    onEnterSelectionMode = { viewModel.enterSelectionMode() },
                     onOpenSettings = onOpenSettings
                 )
             }
@@ -851,24 +887,37 @@ fun ServersScreen(
             exportPreview = exportPreview,
             isSelectedSubset = scopedIds != null,
             onExportMetadata = {
-                viewModel.buildExportContent(null, scopedIds).onSuccess { jsonText ->
-                    pendingExportPayload = jsonText
-                    exportSafLauncher.launch(BackupCryptoManager.STANDARD_EXPORT_FILENAME)
-                    showBackupDialog = false
-                    exportTargetProfileIds = null
-                }
+                viewModel.buildExportContent(null, scopedIds)
+                    .onSuccess { jsonText ->
+                        pendingExportPayload = jsonText to false
+                        exportSafLauncher.launch(BackupCryptoManager.STANDARD_EXPORT_FILENAME)
+                        showBackupDialog = false
+                        exportTargetProfileIds = null
+                    }
+                    .onFailure { err ->
+                        showBackupDialog = false
+                        exportTargetProfileIds = null
+                        viewModel.postErrorBanner(err.message ?: "ส่งออกโปรไฟล์ไม่สำเร็จ")
+                    }
             },
             onExportEncrypted = { pass, includeCreds ->
-                viewModel.buildEncryptedFullBackup(pass, includeCreds, scopedIds).onSuccess { encryptedText ->
-                    pendingExportPayload = encryptedText
-                    exportSafLauncher.launch(BackupCryptoManager.ENCRYPTED_BACKUP_FILENAME)
-                    showBackupDialog = false
-                    exportTargetProfileIds = null
-                }
+                viewModel.buildEncryptedFullBackup(pass, includeCreds, scopedIds)
+                    .onSuccess { encryptedText ->
+                        pendingExportPayload = encryptedText to true
+                        exportSafLauncher.launch(BackupCryptoManager.ENCRYPTED_BACKUP_FILENAME)
+                        showBackupDialog = false
+                        exportTargetProfileIds = null
+                    }
+                    .onFailure { err ->
+                        showBackupDialog = false
+                        exportTargetProfileIds = null
+                        viewModel.postErrorBanner(err.message ?: "สร้างไฟล์สำรองเข้ารหัสไม่สำเร็จ")
+                    }
             },
             onChooseImportFile = {
                 showBackupDialog = false
                 exportTargetProfileIds = null
+                pendingImportMode = ImportFileMode.ANY_SUPPORTED
                 importSafLauncher.launch(arrayOf("*/*"))
             },
             onDismiss = {
@@ -878,52 +927,64 @@ fun ServersScreen(
         )
     }
 
-    importedRawText?.let { raw ->
-        var passphrase by remember(raw) { mutableStateOf("") }
-        var feedback by remember(raw) { mutableStateOf<String?>(null) }
-
-        AlertDialog(
-            onDismissRequest = { importedRawText = null },
-            containerColor = colors.surface,
-            title = { Text("ถอดรหัสไฟล์สำรองข้อมูล") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "ไฟล์นี้เข้ารหัสด้วย AES-256-GCM + PBKDF2 กรุณากรอกรหัสผ่านสำรองข้อมูลเพื่อดูตัวอย่างก่อนนำเข้า:",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    OutlinedTextField(
-                        value = passphrase,
-                        onValueChange = {
-                            passphrase = it
-                            feedback = null
-                        },
-                        label = { Text("รหัสผ่านสำรองข้อมูล") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth().testTag("backup_decrypt_passphrase_input")
-                    )
-                    if (!feedback.isNullOrBlank()) {
-                        Text(feedback!!, color = colors.red, style = MaterialTheme.typography.bodySmall)
+    if (showExportProfilesDialog) {
+        val exportPreview = remember(uiState.allProfiles) {
+            viewModel.getExportPreview(null)
+        }
+        ExportProfilesDialog(
+            exportPreview = exportPreview,
+            onConfirmExportJson = {
+                viewModel.buildExportContent(null, null)
+                    .onSuccess { jsonText ->
+                        pendingExportPayload = jsonText to false
+                        showExportProfilesDialog = false
+                        exportSafLauncher.launch(BackupCryptoManager.STANDARD_EXPORT_FILENAME)
                     }
-                }
+                    .onFailure { err ->
+                        showExportProfilesDialog = false
+                        viewModel.postErrorBanner(err.message ?: "ส่งออกโปรไฟล์ไม่สำเร็จ")
+                    }
             },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        when (val res = viewModel.prepareImportPreview(raw, passphrase)) {
-                            is BackupImportResult.Success -> importedRawText = null
-                            is BackupImportResult.Error -> feedback = res.message
-                        }
-                    },
-                    enabled = passphrase.isNotEmpty()
+            onDismiss = { showExportProfilesDialog = false }
+        )
+    }
+
+    if (showCreateEncryptedBackupDialog) {
+        val exportPreview = remember(uiState.allProfiles) {
+            viewModel.getExportPreview(null)
+        }
+        CreateEncryptedBackupDialog(
+            exportPreview = exportPreview,
+            onCreateBackup = { passphrase, includeCreds ->
+                viewModel.buildEncryptedFullBackup(passphrase, includeCreds, null)
+                    .map { encryptedText ->
+                        pendingExportPayload = encryptedText to true
+                        showCreateEncryptedBackupDialog = false
+                        exportSafLauncher.launch(BackupCryptoManager.ENCRYPTED_BACKUP_FILENAME)
+                    }
+            },
+            onDismiss = { showCreateEncryptedBackupDialog = false }
+        )
+    }
+
+    importedRawText?.let { raw ->
+        DecryptBackupPassphraseDialog(
+            onDecrypt = { passphrase ->
+                when (
+                    val res = viewModel.prepareImportPreview(
+                        rawText = raw,
+                        passphrase = passphrase,
+                        requireEncrypted = pendingImportMode == ImportFileMode.ENCRYPTED_ONLY
+                    )
                 ) {
-                    Text("ถอดรหัสและตรวจสอบ")
+                    is BackupImportResult.Success -> {
+                        importedRawText = null
+                        null
+                    }
+                    is BackupImportResult.Error -> res.message
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { importedRawText = null }) { Text("ยกเลิก") }
-            }
+            onDismiss = { importedRawText = null }
         )
     }
 
@@ -942,14 +1003,9 @@ fun ServersScreen(
     }
 
     importParseError?.let { errorMsg ->
-        AlertDialog(
-            onDismissRequest = { importParseError = null },
-            containerColor = colors.surface,
-            title = { Text("ไม่สามารถอ่านไฟล์สำรองข้อมูล") },
-            text = { Text(errorMsg, color = colors.red) },
-            confirmButton = {
-                TextButton(onClick = { importParseError = null }) { Text("ตกลง") }
-            }
+        ImportErrorDialog(
+            errorMessage = errorMsg,
+            onDismiss = { importParseError = null }
         )
     }
 }
@@ -963,8 +1019,15 @@ private fun CommandCenterHeader(
     sortMenuExpanded: Boolean,
     onSortExpandedChange: (Boolean) -> Unit,
     onSelectSortOrder: (ProfileSortOrder) -> Unit,
+    overflowMenuExpanded: Boolean,
+    onOverflowExpandedChange: (Boolean) -> Unit,
     onOpenGroups: () -> Unit,
     onOpenBackup: () -> Unit,
+    onImportProfiles: () -> Unit,
+    onExportProfiles: () -> Unit,
+    onCreateEncryptedBackup: () -> Unit,
+    onRestoreEncryptedBackup: () -> Unit,
+    onEnterSelectionMode: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     val colors = LocalObsidianColors.current
@@ -1005,23 +1068,12 @@ private fun CommandCenterHeader(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
-                        onClick = onOpenGroups,
-                        modifier = Modifier.size(48.dp).testTag("manage_groups_button")
-                    ) {
-                        Icon(
-                            Icons.Default.CreateNewFolder,
-                            contentDescription = "จัดการกลุ่มเซิร์ฟเวอร์",
-                            tint = colors.textPrimary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    IconButton(
                         onClick = onOpenBackup,
                         modifier = Modifier.size(48.dp).testTag("import_export_button")
                     ) {
                         Icon(
                             Icons.Default.ImportExport,
-                            contentDescription = "นำเข้า/ส่งออกโปรไฟล์",
+                            contentDescription = "ศูนย์สำรองและกู้คืนโปรไฟล์",
                             tint = colors.textPrimary,
                             modifier = Modifier.size(20.dp)
                         )
@@ -1067,6 +1119,91 @@ private fun CommandCenterHeader(
                             tint = colors.cyan,
                             modifier = Modifier.size(20.dp)
                         )
+                    }
+                    Box {
+                        IconButton(
+                            onClick = { onOverflowExpandedChange(true) },
+                            modifier = Modifier.size(48.dp).testTag("servers_overflow_menu_button")
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "เมนูจัดการและสำรองโปรไฟล์",
+                                tint = colors.textPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = overflowMenuExpanded,
+                            onDismissRequest = { onOverflowExpandedChange(false) }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Import Profiles") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.FileUpload, contentDescription = null, tint = colors.cyan)
+                                },
+                                modifier = Modifier.testTag("overflow_import_profiles_item"),
+                                onClick = {
+                                    onOverflowExpandedChange(false)
+                                    onImportProfiles()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export Profiles") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.FileDownload, contentDescription = null, tint = colors.cyan)
+                                },
+                                modifier = Modifier.testTag("overflow_export_profiles_item"),
+                                onClick = {
+                                    onOverflowExpandedChange(false)
+                                    onExportProfiles()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Create Encrypted Backup") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.EnhancedEncryption, contentDescription = null, tint = colors.lime)
+                                },
+                                modifier = Modifier.testTag("overflow_create_encrypted_backup_item"),
+                                onClick = {
+                                    onOverflowExpandedChange(false)
+                                    onCreateEncryptedBackup()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Restore Encrypted Backup") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.LockOpen, contentDescription = null, tint = colors.amber)
+                                },
+                                modifier = Modifier.testTag("overflow_restore_encrypted_backup_item"),
+                                onClick = {
+                                    onOverflowExpandedChange(false)
+                                    onRestoreEncryptedBackup()
+                                }
+                            )
+                            HorizontalDivider(color = colors.subtleBorder)
+                            DropdownMenuItem(
+                                text = { Text("จัดการกลุ่มโปรไฟล์") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.CreateNewFolder, contentDescription = null, tint = colors.textSecondary)
+                                },
+                                modifier = Modifier.testTag("manage_groups_button"),
+                                onClick = {
+                                    onOverflowExpandedChange(false)
+                                    onOpenGroups()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("เลือกหลายรายการ (Bulk)") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Checklist, contentDescription = null, tint = colors.textSecondary)
+                                },
+                                modifier = Modifier.testTag("overflow_enter_selection_mode_item"),
+                                onClick = {
+                                    onOverflowExpandedChange(false)
+                                    onEnterSelectionMode()
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -1898,296 +2035,3 @@ private fun GroupManagerDialog(
     )
 }
 
-@Composable
-private fun BackupExportImportDialog(
-    exportPreview: ExportBackupPreview,
-    isSelectedSubset: Boolean = false,
-    onExportMetadata: () -> Unit,
-    onExportEncrypted: (String, Boolean) -> Unit,
-    onChooseImportFile: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    val colors = LocalObsidianColors.current
-    var passphrase by remember { mutableStateOf("") }
-    var includeCredentials by remember { mutableStateOf(false) }
-
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            color = colors.surface,
-            shape = RoundedCornerShape(ObsidianRadius.xl),
-            border = BorderStroke(1.dp, colors.border),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 24.dp)
-                .widthIn(max = 520.dp)
-                .heightIn(max = 640.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(
-                    text = if (isSelectedSubset) {
-                        "ส่งออกโปรไฟล์ที่เลือก (${exportPreview.totalProfiles})"
-                    } else {
-                        "สำรองและกู้คืนโปรไฟล์"
-                    },
-                    style = MaterialTheme.typography.titleLarge,
-                    color = colors.textPrimary
-                )
-                Column(
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Surface(
-                        color = colors.elevated,
-                        shape = RoundedCornerShape(ObsidianRadius.md),
-                        border = BorderStroke(1.dp, colors.subtleBorder),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = "Export Preview (${exportPreview.totalProfiles} โปรไฟล์)",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = colors.textPrimary
-                            )
-                            Text(
-                                text = "• มี Credential ใน Vault: ${exportPreview.storedCredentialCount} • ไม่มีใน Vault: ${exportPreview.missingStoredCredentialCount}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.textSecondary
-                            )
-                            Text(
-                                text = "• Android Keystore keys และ Known Host Trust จะไม่ถูกส่งออก",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.amber
-                            )
-                        }
-                    }
-
-                    OutlinedButton(
-                        onClick = onExportMetadata,
-                        enabled = exportPreview.totalProfiles > 0,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("export_standard_json_button")
-                    ) {
-                        Text("ส่งออก Standard JSON (Metadata เท่านั้น)")
-                    }
-
-                    HorizontalDivider(color = colors.subtleBorder)
-
-                    Text(
-                        text = "Encrypted Full Backup (.tsshbackup)",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = colors.cyan
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { includeCredentials = !includeCredentials }
-                    ) {
-                        Checkbox(
-                            checked = includeCredentials,
-                            onCheckedChange = { includeCredentials = it },
-                            modifier = Modifier.testTag("export_include_credentials_checkbox")
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "รวมรหัสผ่านและ Private Key จาก Vault",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = colors.textPrimary
-                            )
-                            Text(
-                                text = "เข้ารหัส AES-256-GCM + PBKDF2 (210,000 รอบ) และเข้ารหัสซ้ำด้วย Keystore ของเครื่องปลายทางเมื่อนำเข้า",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.textSecondary
-                            )
-                        }
-                    }
-                    OutlinedTextField(
-                        value = passphrase,
-                        onValueChange = { passphrase = it },
-                        label = { Text("รหัสผ่านสำรองข้อมูล (อย่างน้อย 6 ตัว)") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("export_passphrase_input")
-                    )
-                    Button(
-                        onClick = { onExportEncrypted(passphrase, includeCredentials) },
-                        enabled = exportPreview.totalProfiles > 0 && passphrase.length >= 6,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("export_encrypted_backup_button")
-                    ) {
-                        Text(
-                            if (includeCredentials) "ส่งออก Encrypted Full Backup" else "ส่งออก Encrypted Metadata Backup"
-                        )
-                    }
-
-                    HorizontalDivider(color = colors.subtleBorder)
-
-                    OutlinedButton(
-                        onClick = onChooseImportFile,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("choose_import_file_button")
-                    ) {
-                        Text("นำเข้าไฟล์สำรอง (.json / .tsshbackup / .pocketssh)")
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onDismiss) { Text("ปิด") }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ImportPreviewDialog(
-    preview: ImportPreviewSummary,
-    onDismiss: () -> Unit,
-    onConfirmImport: (ImportDuplicateStrategy, onError: (String) -> Unit) -> Unit
-) {
-    val colors = LocalObsidianColors.current
-    var selectedStrategy by remember { mutableStateOf(ImportDuplicateStrategy.SKIP) }
-    var applyError by remember { mutableStateOf<String?>(null) }
-
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            color = colors.surface,
-            shape = RoundedCornerShape(ObsidianRadius.xl),
-            border = BorderStroke(1.dp, colors.border),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 24.dp)
-                .widthIn(max = 520.dp)
-                .heightIn(max = 640.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(
-                    text = "ตรวจสอบก่อนนำเข้า (Import Preview)",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = colors.textPrimary
-                )
-                Column(
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Surface(
-                        color = colors.elevated,
-                        shape = RoundedCornerShape(ObsidianRadius.md),
-                        border = BorderStroke(1.dp, colors.subtleBorder),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = if (preview.isEncrypted) {
-                                    "ประเภท: Encrypted Backup (v${preview.formatVersion})"
-                                } else {
-                                    "ประเภท: Standard JSON Metadata (v${preview.formatVersion})"
-                                },
-                                style = MaterialTheme.typography.titleSmall,
-                                color = colors.cyan
-                            )
-                            Text(
-                                text = "ทั้งหมด: ${preview.totalCount} • โปรไฟล์ใหม่: ${preview.newCount} • ซ้ำกับที่มีอยู่: ${preview.duplicateCount}",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Text(
-                                text = "Credential ที่มากับไฟล์: ${preview.embeddedCredentialCount} • ยังไม่มีรหัส/Key (ต้องกรอกภายหลัง): ${preview.missingAuthCount}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (preview.missingAuthCount > 0) colors.amber else colors.lime
-                            )
-                            if (preview.invalidOrUnsupportedCount > 0) {
-                                Text(
-                                    text = "รายการไม่สมบูรณ์/ไม่รองรับ (จะถูกข้าม): ${preview.invalidOrUnsupportedCount}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.red
-                                )
-                            }
-                        }
-                    }
-
-                    if (preview.duplicateCount > 0) {
-                        Text(
-                            text = "วิธีจัดการโปรไฟล์ที่ซ้ำกัน:",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = colors.textPrimary
-                        )
-                        ImportDuplicateStrategy.entries.forEach { strategy ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { selectedStrategy = strategy }
-                                    .testTag("import_strategy_${strategy.name}")
-                            ) {
-                                RadioButton(
-                                    selected = selectedStrategy == strategy,
-                                    onClick = { selectedStrategy = strategy }
-                                )
-                                Text(
-                                    text = strategy.label,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = colors.textPrimary
-                                )
-                            }
-                        }
-                    }
-
-                    Text(
-                        text = "เพื่อความปลอดภัย Host Key จะไม่ถูกเชื่อถืออัตโนมัติ (TOFU จะถามยืนยันเมื่อเชื่อมต่อครั้งแรก)",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.textSecondary
-                    )
-
-                    if (!applyError.isNullOrBlank()) {
-                        Text(applyError!!, color = colors.red, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
-                ) {
-                    TextButton(onClick = onDismiss) { Text("ยกเลิก") }
-                    Button(
-                        onClick = { onConfirmImport(selectedStrategy) { err -> applyError = err } },
-                        enabled = preview.newCount > 0 || (preview.duplicateCount > 0 && selectedStrategy != ImportDuplicateStrategy.SKIP),
-                        modifier = Modifier.testTag("confirm_import_button")
-                    ) {
-                        Text("ยืนยันนำเข้า")
-                    }
-                }
-            }
-        }
-    }
-}

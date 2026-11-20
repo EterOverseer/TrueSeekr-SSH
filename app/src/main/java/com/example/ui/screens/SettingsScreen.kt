@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,14 +32,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.EnhancedEncryption
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.ScreenshotMonitor
 import androidx.compose.material.icons.filled.Security
@@ -74,6 +81,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -90,14 +98,24 @@ import com.example.domain.TerminalFontFamily
 import com.example.domain.TerminalThemePreset
 import com.example.network.TailscaleInstallState
 import com.example.network.VpnOwnership
+import com.example.security.BackupCryptoManager
+import com.example.security.BackupImportResult
 import com.example.security.BiometricLockManager
 import com.example.settings.AutoLockTimeout
 import com.example.settings.SettingsViewModel
 import com.example.ui.components.BannerTone
+import com.example.ui.components.CreateEncryptedBackupDialog
+import com.example.ui.components.DecryptBackupPassphraseDialog
+import com.example.ui.components.ExportProfilesDialog
+import com.example.ui.components.ImportErrorDialog
+import com.example.ui.components.ImportFileMode
+import com.example.ui.components.ImportPreviewDialog
 import com.example.ui.components.ObsidianMetadataTag
 import com.example.ui.components.ObsidianSectionHeader
 import com.example.ui.components.ObsidianStatusBanner
 import com.example.ui.components.ObsidianSurfaceCard
+import com.example.ui.components.readBackupTextFromUri
+import com.example.ui.components.writeBackupTextToUri
 import com.example.ui.theme.LocalObsidianColors
 import com.example.ui.theme.MonoCodeStyle
 import com.example.ui.theme.ObsidianRadius
@@ -114,13 +132,23 @@ fun SettingsScreen(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val tailscaleDiagnostics by viewModel.tailscaleDiagnostics.collectAsStateWithLifecycle()
     val knownHosts by viewModel.knownHosts.collectAsStateWithLifecycle()
+    val allProfiles by viewModel.allProfiles.collectAsStateWithLifecycle()
     val vaultCount by viewModel.vaultCount.collectAsStateWithLifecycle()
     val feedback by viewModel.feedbackMessage.collectAsStateWithLifecycle()
+    val feedbackIsError by viewModel.feedbackIsError.collectAsStateWithLifecycle()
+    val pendingImportReview by viewModel.pendingImportReview.collectAsStateWithLifecycle()
 
     val biometricSupported = remember(context) { BiometricLockManager.canAuthenticateBiometric(context) }
     var showPinSetupDialog by remember { mutableStateOf(false) }
     var showLicensesDialog by remember { mutableStateOf(false) }
     var showSecurityArchDialog by remember { mutableStateOf(false) }
+
+    var showExportProfilesDialog by remember { mutableStateOf(false) }
+    var showCreateEncryptedBackupDialog by remember { mutableStateOf(false) }
+    var pendingExportPayload by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    var pendingImportMode by remember { mutableStateOf(ImportFileMode.ANY_SUPPORTED) }
+    var importedEncryptedRawText by remember { mutableStateOf<String?>(null) }
+    var importParseError by remember { mutableStateOf<String?>(null) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -130,6 +158,57 @@ fun SettingsScreen(
         } else {
             viewModel.setBackgroundKeepAliveEnabled(false)
             viewModel.postFeedback("กรุณาอนุญาตการแจ้งเตือน (Notification) เพื่อแสดงแถบสถานะ Background Keep Alive บน Android 13+")
+        }
+    }
+
+    val exportSafLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("*/*")
+    ) { uri: Uri? ->
+        val pending = pendingExportPayload
+        pendingExportPayload = null
+        if (uri != null && pending != null) {
+            val (payload, isEncrypted) = pending
+            writeBackupTextToUri(context, uri, payload)
+                .onSuccess {
+                    viewModel.postFeedback(
+                        if (isEncrypted) {
+                            "บันทึกไฟล์สำรองเข้ารหัส (.tsshbackup) เรียบร้อยแล้ว"
+                        } else {
+                            "ส่งออกโปรไฟล์ (JSON) เรียบร้อยแล้ว"
+                        }
+                    )
+                }
+                .onFailure { err ->
+                    viewModel.postFeedback(
+                        err.message ?: "ไม่สามารถบันทึกไฟล์สำรองข้อมูลได้",
+                        isError = true
+                    )
+                }
+        }
+    }
+
+    val importSafLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            importParseError = null
+            readBackupTextFromUri(context, uri)
+                .onSuccess { text ->
+                    val isEncrypted = BackupCryptoManager.isEncryptedBackup(text)
+                    if (pendingImportMode == ImportFileMode.ENCRYPTED_ONLY && !isEncrypted) {
+                        importParseError = "ไฟล์ที่เลือกไม่ใช่ไฟล์สำรองแบบเข้ารหัส (.tsshbackup) กรุณาใช้เมนู Import Profiles สำหรับไฟล์ JSON"
+                    } else if (isEncrypted) {
+                        importedEncryptedRawText = text
+                    } else {
+                        val res = viewModel.prepareImportPreview(text, null, requireEncrypted = false)
+                        if (res is BackupImportResult.Error) {
+                            importParseError = res.message
+                        }
+                    }
+                }
+                .onFailure { err ->
+                    importParseError = err.message ?: "ไม่สามารถเปิดไฟล์สำรองข้อมูลได้"
+                }
         }
     }
 
@@ -168,7 +247,7 @@ fun SettingsScreen(
                 item {
                     ObsidianStatusBanner(
                         message = feedback!!,
-                        tone = BannerTone.INFO,
+                        tone = if (feedbackIsError) BannerTone.ERROR else BannerTone.INFO,
                         onDismiss = { viewModel.clearFeedback() }
                     )
                 }
@@ -546,6 +625,86 @@ fun SettingsScreen(
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // 3.5 BACKUP & RESTORE
+            item {
+                ObsidianSectionHeader(
+                    title = "Backup & Restore",
+                    icon = Icons.Default.Backup,
+                    accentColor = colors.cyan
+                )
+            }
+            item {
+                ObsidianSurfaceCard(elevated = true) {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "สำรองและกู้คืนโปรไฟล์ SSH",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = colors.textPrimary
+                            )
+                            ObsidianMetadataTag(
+                                text = "${allProfiles.size} โปรไฟล์ • Vault $vaultCount",
+                                tint = colors.cyan
+                            )
+                        }
+                        Text(
+                            text = "รองรับไฟล์ Standard JSON (.json) และไฟล์สำรองเข้ารหัสเต็มรูปแบบ (.tsshbackup) พร้อมตรวจสอบก่อนนำเข้า",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.textSecondary
+                        )
+                        HorizontalDivider(color = colors.subtleBorder)
+                        SettingsActionRow(
+                            title = "Import Profiles",
+                            subtitle = "นำเข้าโปรไฟล์จากไฟล์ .json หรือ .tsshbackup พร้อมตัวเลือกจัดการรายการซ้ำ",
+                            icon = Icons.Default.FileUpload,
+                            accentColor = colors.cyan,
+                            testTag = "settings_import_profiles_item",
+                            onClick = {
+                                pendingImportMode = ImportFileMode.ANY_SUPPORTED
+                                importSafLauncher.launch(arrayOf("*/*"))
+                            }
+                        )
+                        HorizontalDivider(color = colors.subtleBorder)
+                        SettingsActionRow(
+                            title = "Export Profiles",
+                            subtitle = "ส่งออกข้อมูลโปรไฟล์และกลุ่มเป็นไฟล์ JSON (ไม่รวมรหัสผ่าน/Key และ Known Hosts)",
+                            icon = Icons.Default.FileDownload,
+                            accentColor = colors.cyan,
+                            testTag = "settings_export_profiles_item",
+                            onClick = { showExportProfilesDialog = true }
+                        )
+                        HorizontalDivider(color = colors.subtleBorder)
+                        SettingsActionRow(
+                            title = "Create Encrypted Backup",
+                            subtitle = "สร้างไฟล์สำรองเข้ารหัส AES-256-GCM (.tsshbackup) เลือกรวม Vault Credentials ได้",
+                            icon = Icons.Default.EnhancedEncryption,
+                            accentColor = colors.lime,
+                            testTag = "settings_create_encrypted_backup_item",
+                            onClick = { showCreateEncryptedBackupDialog = true }
+                        )
+                        HorizontalDivider(color = colors.subtleBorder)
+                        SettingsActionRow(
+                            title = "Restore Encrypted Backup",
+                            subtitle = "ถอดรหัสและกู้คืนจากไฟล์ .tsshbackup เข้าสู่ฐานข้อมูลและ Android Keystore",
+                            icon = Icons.Default.LockOpen,
+                            accentColor = colors.amber,
+                            testTag = "settings_restore_encrypted_backup_item",
+                            onClick = {
+                                pendingImportMode = ImportFileMode.ENCRYPTED_ONLY
+                                importSafLauncher.launch(arrayOf("*/*"))
+                            }
+                        )
                     }
                 }
             }
@@ -990,6 +1149,138 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(onClick = { showLicensesDialog = false }) { Text("ปิด") }
             }
+        )
+    }
+
+    if (showExportProfilesDialog) {
+        val preview = remember(allProfiles, vaultCount) {
+            viewModel.getExportPreview()
+        }
+        ExportProfilesDialog(
+            exportPreview = preview,
+            onConfirmExportJson = {
+                viewModel.buildStandardJsonExport()
+                    .onSuccess { jsonText ->
+                        pendingExportPayload = jsonText to false
+                        showExportProfilesDialog = false
+                        exportSafLauncher.launch(BackupCryptoManager.STANDARD_EXPORT_FILENAME)
+                    }
+                    .onFailure { err ->
+                        showExportProfilesDialog = false
+                        viewModel.postFeedback(err.message ?: "ส่งออกโปรไฟล์ไม่สำเร็จ", isError = true)
+                    }
+            },
+            onDismiss = { showExportProfilesDialog = false }
+        )
+    }
+
+    if (showCreateEncryptedBackupDialog) {
+        val preview = remember(allProfiles, vaultCount) {
+            viewModel.getExportPreview()
+        }
+        CreateEncryptedBackupDialog(
+            exportPreview = preview,
+            onCreateBackup = { passphrase, includeCredentials ->
+                viewModel.buildEncryptedFullBackup(passphrase, includeCredentials)
+                    .map { encryptedText ->
+                        pendingExportPayload = encryptedText to true
+                        showCreateEncryptedBackupDialog = false
+                        exportSafLauncher.launch(BackupCryptoManager.ENCRYPTED_BACKUP_FILENAME)
+                    }
+            },
+            onDismiss = { showCreateEncryptedBackupDialog = false }
+        )
+    }
+
+    importedEncryptedRawText?.let { raw ->
+        DecryptBackupPassphraseDialog(
+            onDecrypt = { passphrase ->
+                when (
+                    val res = viewModel.prepareImportPreview(
+                        rawText = raw,
+                        passphrase = passphrase,
+                        requireEncrypted = pendingImportMode == ImportFileMode.ENCRYPTED_ONLY
+                    )
+                ) {
+                    is BackupImportResult.Success -> {
+                        importedEncryptedRawText = null
+                        null
+                    }
+                    is BackupImportResult.Error -> res.message
+                }
+            },
+            onDismiss = { importedEncryptedRawText = null }
+        )
+    }
+
+    pendingImportReview?.let { review ->
+        ImportPreviewDialog(
+            preview = review.preview,
+            onDismiss = { viewModel.dismissImportPreview() },
+            onConfirmImport = { strategy, onError ->
+                viewModel.confirmImportWithStrategy(strategy) { msg ->
+                    if (!msg.contains("สำเร็จ")) {
+                        onError(msg)
+                    }
+                }
+            }
+        )
+    }
+
+    importParseError?.let { errorMsg ->
+        ImportErrorDialog(
+            errorMessage = errorMsg,
+            onDismiss = { importParseError = null }
+        )
+    }
+}
+
+@Composable
+private fun SettingsActionRow(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    accentColor: Color,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    val colors = LocalObsidianColors.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clip(RoundedCornerShape(ObsidianRadius.md))
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp, horizontal = 4.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Surface(
+            color = accentColor.copy(alpha = 0.14f),
+            shape = RoundedCornerShape(ObsidianRadius.sm),
+            modifier = Modifier.size(40.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = null, tint = accentColor, modifier = Modifier.size(20.dp))
+            }
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+                color = colors.textPrimary
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.textSecondary
+            )
+        }
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = title,
+            tint = colors.textSecondary
         )
     }
 }

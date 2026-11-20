@@ -9,12 +9,19 @@ import com.example.domain.AppAccentPreset
 import com.example.domain.AppThemeMode
 import com.example.domain.HealthRefreshInterval
 import com.example.domain.KnownHost
+import com.example.domain.ProfileGroup
+import com.example.domain.SshProfile
 import com.example.domain.TerminalCursorStyle
 import com.example.domain.TerminalFontFamily
 import com.example.domain.TerminalThemePreset
 import com.example.network.TailscaleConnectionCoordinator
 import com.example.network.TailscaleDiagnosticSnapshot
+import com.example.profiles.PendingImportReview
+import com.example.security.BackupCryptoManager
+import com.example.security.BackupImportResult
 import com.example.security.CredentialVault
+import com.example.security.ExportBackupPreview
+import com.example.security.ImportDuplicateStrategy
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -39,11 +46,23 @@ class SettingsViewModel(
     val knownHosts: StateFlow<List<KnownHost>> = knownHostRepository.allKnownHosts
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val allProfiles: StateFlow<List<SshProfile>> = profileRepository.allProfiles
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val allGroups: StateFlow<List<ProfileGroup>> = profileRepository.allGroups
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     private val _vaultCount = MutableStateFlow(credentialVault.listAllSummaries().size)
     val vaultCount: StateFlow<Int> = _vaultCount.asStateFlow()
 
     private val _feedbackMessage = MutableStateFlow<String?>(null)
     val feedbackMessage: StateFlow<String?> = _feedbackMessage.asStateFlow()
+
+    private val _feedbackIsError = MutableStateFlow(false)
+    val feedbackIsError: StateFlow<Boolean> = _feedbackIsError.asStateFlow()
+
+    private val _pendingImportReview = MutableStateFlow<PendingImportReview?>(null)
+    val pendingImportReview: StateFlow<PendingImportReview?> = _pendingImportReview.asStateFlow()
 
     fun refreshVaultCount() {
         _vaultCount.value = credentialVault.listAllSummaries().size
@@ -51,6 +70,7 @@ class SettingsViewModel(
 
     fun clearFeedback() {
         _feedbackMessage.value = null
+        _feedbackIsError.value = false
     }
 
     fun setAppLockEnabled(enabled: Boolean) {
@@ -241,8 +261,107 @@ class SettingsViewModel(
         }
     }
 
-    fun postFeedback(message: String) {
+    fun postFeedback(message: String, isError: Boolean = false) {
+        _feedbackIsError.value = isError
         _feedbackMessage.value = message
+    }
+
+    fun getExportPreview(): ExportBackupPreview {
+        return BackupCryptoManager.buildExportPreview(allProfiles.value, credentialVault)
+    }
+
+    fun buildStandardJsonExport(): Result<String> {
+        val profiles = allProfiles.value
+        if (profiles.isEmpty()) {
+            return Result.failure(IllegalStateException("ยังไม่มีโปรไฟล์สำหรับส่งออก"))
+        }
+        val groups = allGroups.value.filter { !it.isBuiltIn }.map { it.name }
+        return runCatching {
+            BackupCryptoManager.exportMetadataJson(profiles, groups)
+        }
+    }
+
+    fun buildEncryptedFullBackup(passphrase: String, includeCredentials: Boolean): Result<String> {
+        val profiles = allProfiles.value
+        if (profiles.isEmpty()) {
+            return Result.failure(IllegalStateException("ยังไม่มีโปรไฟล์สำหรับสำรองข้อมูล"))
+        }
+        val groups = allGroups.value.filter { !it.isBuiltIn }.map { it.name }
+        val passChars = passphrase.toCharArray()
+        return try {
+            runCatching {
+                BackupCryptoManager.exportEncryptedFullBackup(
+                    profiles = profiles,
+                    groups = groups,
+                    passphrase = passChars,
+                    credentialVault = credentialVault,
+                    includeCredentials = includeCredentials
+                )
+            }
+        } finally {
+            passChars.fill('\u0000')
+        }
+    }
+
+    fun prepareImportPreview(
+        rawText: String,
+        passphrase: String?,
+        requireEncrypted: Boolean = false
+    ): BackupImportResult {
+        val isEncrypted = BackupCryptoManager.isEncryptedBackup(rawText)
+        if (requireEncrypted && !isEncrypted) {
+            return BackupImportResult.Error(
+                "ไฟล์ที่เลือกไม่ใช่ไฟล์สำรองแบบเข้ารหัส (.tsshbackup) กรุณาใช้เมนู Import Profiles สำหรับไฟล์ JSON"
+            )
+        }
+        val passChars = passphrase?.toCharArray()
+        return try {
+            val result = BackupCryptoManager.importBackup(rawText, passChars)
+            if (result is BackupImportResult.Success) {
+                val preview = BackupCryptoManager.analyzeImportPreview(
+                    bundle = result.bundle,
+                    existingProfiles = allProfiles.value,
+                    isEncrypted = isEncrypted
+                )
+                _pendingImportReview.value = PendingImportReview(
+                    rawBundle = result.bundle,
+                    preview = preview
+                )
+            }
+            result
+        } finally {
+            passChars?.fill('\u0000')
+        }
+    }
+
+    fun dismissImportPreview() {
+        _pendingImportReview.value = null
+    }
+
+    fun confirmImportWithStrategy(strategy: ImportDuplicateStrategy, onDone: (String) -> Unit = {}) {
+        val review = _pendingImportReview.value ?: return
+        viewModelScope.launch {
+            try {
+                val summary = profileRepository.importWithStrategy(review.rawBundle, strategy)
+                _pendingImportReview.value = null
+                refreshVaultCount()
+                val parts = buildList {
+                    if (summary.importedNewCount > 0) add("ใหม่ ${summary.importedNewCount}")
+                    if (summary.replacedCount > 0) add("เขียนทับ ${summary.replacedCount}")
+                    if (summary.keptBothCount > 0) add("เก็บคู่ ${summary.keptBothCount}")
+                    if (summary.skippedDuplicateCount > 0) add("ข้ามซ้ำ ${summary.skippedDuplicateCount}")
+                    if (summary.reEncryptedCredentialsCount > 0) add("กู้คืน Credential ${summary.reEncryptedCredentialsCount}")
+                }
+                val detail = if (parts.isEmpty()) "ไม่มีรายการเปลี่ยนแปลง" else parts.joinToString(" • ")
+                val msg = "นำเข้าสำเร็จ: $detail (Host Key ยังต้องยืนยัน TOFU ด้วยตนเอง)"
+                postFeedback(msg, isError = false)
+                onDone(msg)
+            } catch (t: Throwable) {
+                val err = "นำเข้าล้มเหลวและยกเลิกการเปลี่ยนแปลงทั้งหมด: ${t.message ?: "Unknown error"}"
+                postFeedback(err, isError = true)
+                onDone(err)
+            }
+        }
     }
 
     fun refreshTailscaleDiagnostics() {

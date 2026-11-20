@@ -292,6 +292,15 @@ class ServersViewModel(
         errorBanner.value = null
     }
 
+    fun postMessageBanner(message: String) {
+        errorBanner.value = null
+        messageBanner.value = message
+    }
+
+    fun postErrorBanner(message: String) {
+        errorBanner.value = message
+    }
+
     fun openCreateEditor() {
         viewModelScope.launch {
             val defaults: AppSettings = preferencesRepository.settings.first()
@@ -775,7 +784,17 @@ class ServersViewModel(
         return if (profileIds == null) all else all.filter { it.id in profileIds }
     }
 
-    fun prepareImportPreview(rawText: String, passphrase: String?): BackupImportResult {
+    fun prepareImportPreview(
+        rawText: String,
+        passphrase: String?,
+        requireEncrypted: Boolean = false
+    ): BackupImportResult {
+        val isEncrypted = BackupCryptoManager.isEncryptedBackup(rawText)
+        if (requireEncrypted && !isEncrypted) {
+            return BackupImportResult.Error(
+                "ไฟล์ที่เลือกไม่ใช่ไฟล์สำรองแบบเข้ารหัส (.tsshbackup) กรุณาใช้เมนู Import Profiles สำหรับไฟล์ JSON"
+            )
+        }
         val passChars = passphrase?.toCharArray()
         return try {
             val result = BackupCryptoManager.importBackup(rawText, passChars)
@@ -783,7 +802,7 @@ class ServersViewModel(
                 val preview = BackupCryptoManager.analyzeImportPreview(
                     bundle = result.bundle,
                     existingProfiles = uiState.value.allProfiles,
-                    isEncrypted = BackupCryptoManager.isEncryptedBackup(rawText)
+                    isEncrypted = isEncrypted
                 )
                 _pendingImportReview.value = PendingImportReview(
                     rawBundle = result.bundle,
