@@ -103,6 +103,7 @@ data class SshProfile(
     val terminalFontSizeSp: Float = 13f,
     val terminalTheme: TerminalThemePreset = TerminalThemePreset.CHARCOAL_LIME,
     val initialWorkingDir: String = "",
+    val autoTailscaleConnect: Boolean = false,
     val credentialRefId: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),

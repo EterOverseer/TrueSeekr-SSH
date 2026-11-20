@@ -1,5 +1,6 @@
 package com.example.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -37,6 +38,8 @@ data class SshProfileEntity(
     val terminalFontSizeSp: Float,
     val terminalTheme: String,
     val initialWorkingDir: String,
+    @ColumnInfo(defaultValue = "0")
+    val autoTailscaleConnect: Boolean = false,
     val credentialRefId: String?,
     val createdAt: Long,
     val updatedAt: Long,
@@ -60,6 +63,7 @@ data class SshProfileEntity(
         terminalFontSizeSp = terminalFontSizeSp,
         terminalTheme = runCatching { TerminalThemePreset.valueOf(terminalTheme) }.getOrDefault(TerminalThemePreset.CHARCOAL_LIME),
         initialWorkingDir = initialWorkingDir,
+        autoTailscaleConnect = autoTailscaleConnect,
         credentialRefId = credentialRefId,
         createdAt = createdAt,
         updatedAt = updatedAt,
@@ -85,6 +89,7 @@ data class SshProfileEntity(
             terminalFontSizeSp = profile.terminalFontSizeSp,
             terminalTheme = profile.terminalTheme.name,
             initialWorkingDir = profile.initialWorkingDir.trim(),
+            autoTailscaleConnect = profile.autoTailscaleConnect,
             credentialRefId = profile.credentialRefId,
             createdAt = profile.createdAt,
             updatedAt = profile.updatedAt,

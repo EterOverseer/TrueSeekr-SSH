@@ -11,6 +11,8 @@ import com.example.domain.KnownHost
 import com.example.domain.TerminalCursorStyle
 import com.example.domain.TerminalFontFamily
 import com.example.domain.TerminalThemePreset
+import com.example.network.TailscaleConnectionCoordinator
+import com.example.network.TailscaleDiagnosticSnapshot
 import com.example.security.CredentialVault
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -23,11 +25,15 @@ class SettingsViewModel(
     private val preferencesRepository: AppPreferencesRepository,
     private val knownHostRepository: KnownHostRepository,
     private val profileRepository: ProfileRepository,
-    private val credentialVault: CredentialVault
+    private val credentialVault: CredentialVault,
+    private val tailscaleCoordinator: TailscaleConnectionCoordinator? = null
 ) : ViewModel() {
 
     val settings: StateFlow<AppSettings> = preferencesRepository.settings
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppSettings())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings())
+
+    val tailscaleDiagnostics: StateFlow<TailscaleDiagnosticSnapshot> =
+        tailscaleCoordinator?.diagnosticSnapshot ?: MutableStateFlow(TailscaleDiagnosticSnapshot()).asStateFlow()
 
     val knownHosts: StateFlow<List<KnownHost>> = knownHostRepository.allKnownHosts
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -162,6 +168,50 @@ class SettingsViewModel(
         }
     }
 
+    fun setTailscaleAutomationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setTailscaleAutomationEnabled(enabled)
+        }
+    }
+
+    fun setTailscaleAutoDisconnect(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setTailscaleAutoDisconnect(enabled)
+        }
+    }
+
+    fun setTailscaleConnectTimeoutSec(seconds: Int) {
+        viewModelScope.launch {
+            preferencesRepository.setTailscaleConnectTimeoutSec(seconds)
+        }
+    }
+
+    fun refreshTailscaleDiagnostics() {
+        tailscaleCoordinator?.refreshDiagnostics()
+    }
+
+    fun openTailscaleApp() {
+        val opened = tailscaleCoordinator?.openTailscaleApp() ?: false
+        if (!opened) {
+            _feedbackMessage.value = "ไม่สามารถเปิดแอป Tailscale ได้ กรุณาตรวจสอบว่าติดตั้งแอป Tailscale แล้ว"
+        }
+    }
+
+    fun openTailscalePlayStore() {
+        tailscaleCoordinator?.openTailscalePlayStore()
+    }
+
+    fun disconnectOwnedTailscaleVpn() {
+        viewModelScope.launch {
+            val result = tailscaleCoordinator?.disconnectOwnedVpnNow()
+            if (result != null && !result.launched && !result.errorMessage.isNullOrBlank()) {
+                _feedbackMessage.value = result.errorMessage
+            } else if (result?.launched == true) {
+                _feedbackMessage.value = "ส่งคำสั่งตัดการเชื่อมต่อ Tailscale VPN แล้ว"
+            }
+        }
+    }
+
     fun removeKnownHost(id: String) {
         viewModelScope.launch {
             knownHostRepository.removeTrustedHost(id)
@@ -189,7 +239,8 @@ class SettingsViewModel(
         private val preferencesRepository: AppPreferencesRepository,
         private val knownHostRepository: KnownHostRepository,
         private val profileRepository: ProfileRepository,
-        private val credentialVault: CredentialVault
+        private val credentialVault: CredentialVault,
+        private val tailscaleCoordinator: TailscaleConnectionCoordinator? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -197,7 +248,8 @@ class SettingsViewModel(
                 preferencesRepository,
                 knownHostRepository,
                 profileRepository,
-                credentialVault
+                credentialVault,
+                tailscaleCoordinator
             ) as T
         }
     }

@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.NetworkMonitor
@@ -30,6 +31,10 @@ import com.example.ui.components.UnknownHostKeyDialog
 import com.example.ui.screens.ProfileEditorDialog
 import com.example.ui.screens.ServersScreen
 import com.example.ui.theme.PocketSshTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -45,7 +50,7 @@ import java.io.File
 import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [36], qualifiers = "w411dp-h891dp")
 class ComposeUiFlowTest {
 
     @get:Rule
@@ -53,6 +58,7 @@ class ComposeUiFlowTest {
 
     private lateinit var db: PocketSshDatabase
     private lateinit var vaultDir: File
+    private lateinit var dataStoreScope: CoroutineScope
     private lateinit var vault: CredentialVault
     private lateinit var profileRepo: ProfileRepository
     private lateinit var viewModel: ServersViewModel
@@ -63,7 +69,8 @@ class ComposeUiFlowTest {
         db = Room.inMemoryDatabaseBuilder(context, PocketSshDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        vaultDir = File(context.cacheDir, "ui_test_vault_${UUID.randomUUID()}").apply { mkdirs() }
+        val testId = UUID.randomUUID().toString()
+        vaultDir = File(context.cacheDir, "ui_test_vault_$testId").apply { mkdirs() }
         vault = CredentialVault(vaultDir, SoftwareAesGcmCryptoEngine())
         profileRepo = ProfileRepository(
             profileDao = db.profileDao(),
@@ -76,12 +83,18 @@ class ComposeUiFlowTest {
         }
         val knownHostRepo = KnownHostRepository(db.knownHostDao())
         val networkMonitor = NetworkMonitor(context)
-        val prefsRepo = AppPreferencesRepository(context)
+        dataStoreScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val testDataStore = PreferenceDataStoreFactory.create(
+            scope = dataStoreScope,
+            produceFile = { File(vaultDir, "compose_flow_prefs_$testId.preferences_pb") }
+        )
+        val prefsRepo = AppPreferencesRepository(context, customDataStore = testDataStore)
         val sshSessionManager = SshSessionManager(
             profileRepository = profileRepo,
             knownHostRepository = knownHostRepo,
             credentialVault = vault,
-            networkMonitor = networkMonitor
+            networkMonitor = networkMonitor,
+            preferencesRepository = prefsRepo
         )
         viewModel = ServersViewModel(
             profileRepository = profileRepo,
@@ -94,6 +107,7 @@ class ComposeUiFlowTest {
 
     @After
     fun tearDown() {
+        dataStoreScope.cancel()
         db.close()
         vaultDir.deleteRecursively()
     }

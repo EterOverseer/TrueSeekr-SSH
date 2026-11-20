@@ -91,6 +91,8 @@ import com.example.core.Formatters
 import com.example.domain.CommandSnippet
 import com.example.domain.SessionStatus
 import com.example.domain.TerminalFontFamily
+import com.example.network.TailscaleProgressState
+import com.example.network.VpnOwnership
 import com.example.settings.AppSettings
 import com.example.ssh.ManagedSessionUiState
 import com.example.terminal.MetricsLoadState
@@ -250,6 +252,30 @@ fun TerminalScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     ConnectionStatusPill(status = activeSession.status, compact = true)
+                    val showVpnBadge = activeSession.tailscaleState != TailscaleProgressState.IDLE ||
+                        activeSession.vpnOwnership == VpnOwnership.APP_REQUESTED ||
+                        activeSession.vpnOwnership == VpnOwnership.EXTERNAL
+                    if (showVpnBadge) {
+                        val badgeText = when {
+                            activeSession.tailscaleState.isInProgress -> activeSession.tailscaleState.label
+                            activeSession.vpnOwnership == VpnOwnership.EXTERNAL -> "External VPN"
+                            activeSession.vpnOwnership == VpnOwnership.UNKNOWN -> "VPN (Unknown)"
+                            activeSession.vpnOwnership == VpnOwnership.APP_REQUESTED -> "Tailscale"
+                            else -> activeSession.tailscaleState.label
+                        }
+                        val badgeTint = when {
+                            activeSession.tailscaleState.isError -> colors.red
+                            activeSession.vpnOwnership == VpnOwnership.EXTERNAL ||
+                                activeSession.vpnOwnership == VpnOwnership.UNKNOWN -> colors.amber
+                            activeSession.vpnOwnership == VpnOwnership.APP_REQUESTED -> colors.lime
+                            else -> colors.cyan
+                        }
+                        ObsidianMetadataTag(
+                            text = badgeText,
+                            tint = badgeTint,
+                            modifier = Modifier.testTag("terminal_tailscale_status_pill")
+                        )
+                    }
                     if (activeSession.status == SessionStatus.CONNECTED && activeSession.connectedAtMs != null) {
                         TerminalUptimeText(
                             connectedAtMs = activeSession.connectedAtMs,
@@ -356,11 +382,21 @@ fun TerminalScreen(
                 }
 
                 if (!activeSession.errorMessage.isNullOrBlank()) {
+                    val actionLabel = when {
+                        activeSession.showInstallTailscaleAction -> "Install Tailscale"
+                        activeSession.showOpenTailscaleAction -> "Open Tailscale"
+                        else -> "Reconnect"
+                    }
+                    val onBannerAction: () -> Unit = when {
+                        activeSession.showInstallTailscaleAction -> { { viewModel.openTailscalePlayStore() } }
+                        activeSession.showOpenTailscaleAction -> { { viewModel.openTailscaleApp() } }
+                        else -> { { viewModel.reconnect(activeSession.sessionId) } }
+                    }
                     ObsidianStatusBanner(
                         message = activeSession.errorMessage,
                         tone = BannerTone.ERROR,
-                        actionLabel = "Reconnect",
-                        onAction = { viewModel.reconnect(activeSession.sessionId) },
+                        actionLabel = actionLabel,
+                        onAction = onBannerAction,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                     )
                 } else if (!activeSession.networkWarning.isNullOrBlank()) {
@@ -369,6 +405,12 @@ fun TerminalScreen(
                         tone = BannerTone.WARNING,
                         actionLabel = "Reconnect",
                         onAction = { viewModel.reconnect(activeSession.sessionId) },
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                } else if (!activeSession.tailscaleNotice.isNullOrBlank() && activeSession.status == SessionStatus.CONNECTING) {
+                    ObsidianStatusBanner(
+                        message = activeSession.tailscaleNotice,
+                        tone = BannerTone.INFO,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                     )
                 }

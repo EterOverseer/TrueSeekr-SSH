@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
@@ -89,6 +90,7 @@ import kotlin.math.roundToInt
 fun ProfileEditorDialog(
     draft: ProfileEditorDraft,
     groups: List<ProfileGroup>,
+    globalTailscaleEnabled: Boolean = false,
     onUpdate: ((ProfileEditorDraft) -> ProfileEditorDraft) -> Unit,
     onCancel: () -> Unit,
     onSaveProfile: () -> Unit,
@@ -486,6 +488,63 @@ fun ProfileEditorDialog(
                             shape = RoundedCornerShape(ObsidianRadius.md),
                             modifier = Modifier.fillMaxWidth()
                         )
+                    }
+                }
+
+                // Network & Tailscale Automation
+                ObsidianSurfaceCard {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Hub, contentDescription = null, tint = colors.cyan)
+                            Column {
+                                Text(
+                                    text = "เครือข่ายและ Tailscale อัตโนมัติ",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = colors.textPrimary
+                                )
+                                Text(
+                                    text = "ใช้แอป Tailscale อย่างเป็นทางการบน Android",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.textSecondary
+                                )
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                                Text(
+                                    text = "เปิด Tailscale อัตโนมัติก่อนเชื่อม SSH",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (globalTailscaleEnabled) colors.textPrimary else colors.textSecondary
+                                )
+                                Text(
+                                    text = if (globalTailscaleEnabled) {
+                                        "สั่งเปิด Tailscale ก่อนเชื่อม และปิดอัตโนมัติเฉพาะเมื่อแอปเป็นคนเริ่มและปิดทุกแท็บแล้ว"
+                                    } else {
+                                        "Master Switch ใน Settings ปิดอยู่ (ค่าของโปรไฟล์ยังถูกเก็บไว้ แต่จะไม่สั่งเปิด Tailscale อัตโนมัติ)"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.textSecondary
+                                )
+                            }
+                            Switch(
+                                checked = draft.autoTailscaleConnect,
+                                enabled = globalTailscaleEnabled,
+                                onCheckedChange = { enabled ->
+                                    onUpdate { it.copy(autoTailscaleConnect = enabled) }
+                                },
+                                modifier = Modifier.testTag("editor_auto_tailscale_switch")
+                            )
+                        }
                     }
                 }
 

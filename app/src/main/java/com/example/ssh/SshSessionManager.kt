@@ -13,6 +13,10 @@ import com.example.domain.ServerMetrics
 import com.example.domain.SessionConnectionMeta
 import com.example.domain.SessionStatus
 import com.example.domain.SshProfile
+import com.example.network.TailscaleConnectionCoordinator
+import com.example.network.TailscalePreparationResult
+import com.example.network.TailscaleProgressState
+import com.example.network.VpnOwnership
 import com.example.security.CredentialVault
 import com.example.settings.AppPreferencesRepository
 import com.example.terminal.TerminalSessionHandle
@@ -54,7 +58,12 @@ data class ManagedSessionUiState(
     val routeLabel: String = "",
     val meta: SessionConnectionMeta = SessionConnectionMeta(),
     val errorMessage: String? = null,
-    val networkWarning: String? = null
+    val networkWarning: String? = null,
+    val tailscaleState: TailscaleProgressState = TailscaleProgressState.IDLE,
+    val vpnOwnership: VpnOwnership = VpnOwnership.NONE,
+    val tailscaleNotice: String? = null,
+    val showOpenTailscaleAction: Boolean = false,
+    val showInstallTailscaleAction: Boolean = false
 )
 
 class ManagedSessionRuntime(
@@ -78,7 +87,8 @@ class SshSessionManager(
     private val knownHostRepository: KnownHostRepository,
     private val credentialVault: CredentialVault,
     private val networkMonitor: NetworkMonitor,
-    private val preferencesRepository: AppPreferencesRepository? = null
+    private val preferencesRepository: AppPreferencesRepository? = null,
+    private val tailscaleCoordinator: TailscaleConnectionCoordinator? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -160,6 +170,10 @@ class SshSessionManager(
     }
 
     fun getRuntime(sessionId: String): ManagedSessionRuntime? = runtimes[sessionId]
+
+    fun openTailscaleApp(): Boolean = tailscaleCoordinator?.openTailscaleApp() ?: false
+
+    fun openTailscalePlayStore(): Boolean = tailscaleCoordinator?.openTailscalePlayStore() ?: false
 
     /**
      * Initiates a connection using a previously persisted SshProfile.
@@ -279,11 +293,15 @@ class SshSessionManager(
         val runtime = runtimes[sessionId] ?: return
         scope.launch {
             closeTransportOnly(runtime)
+            tailscaleCoordinator?.onSessionEnded(sessionId)
             updateSessionState(sessionId) {
                 it.copy(
                     status = SessionStatus.DISCONNECTED,
                     latencyMs = null,
-                    networkWarning = null
+                    networkWarning = null,
+                    tailscaleState = TailscaleProgressState.IDLE,
+                    vpnOwnership = tailscaleCoordinator?.diagnosticSnapshot?.value?.ownership ?: VpnOwnership.NONE,
+                    tailscaleNotice = null
                 )
             }
             withContext(Dispatchers.Main) {
@@ -296,6 +314,7 @@ class SshSessionManager(
         val runtime = runtimes.remove(sessionId) ?: return
         scope.launch {
             closeTransportOnly(runtime)
+            tailscaleCoordinator?.onSessionEnded(sessionId)
         }
         _sessions.update { list -> list.filterNot { it.sessionId == sessionId } }
         if (_activeSessionId.value == sessionId) {
@@ -304,8 +323,25 @@ class SshSessionManager(
     }
 
     fun disconnectAllSessions() {
-        val ids = runtimes.keys.toList()
-        ids.forEach { disconnectSession(it) }
+        val snapshotRuntimes = runtimes.values.toList()
+        scope.launch {
+            snapshotRuntimes.forEach { runtime ->
+                closeTransportOnly(runtime)
+                updateSessionState(runtime.sessionId) {
+                    it.copy(
+                        status = SessionStatus.DISCONNECTED,
+                        latencyMs = null,
+                        networkWarning = null,
+                        tailscaleState = TailscaleProgressState.IDLE,
+                        tailscaleNotice = null
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    runtime.terminalHandle.writeLocalNotice("\r\n[ตัดการเชื่อมต่อ SSH แล้ว]")
+                }
+            }
+            tailscaleCoordinator?.onAllSessionsEnded()
+        }
         credentialVault.clearAllEphemeralPassphrases()
     }
 
@@ -393,7 +429,73 @@ class SshSessionManager(
         passphraseStr: String?
     ) {
         val runtime = runtimes[sessionId] ?: return
+        var leaseAcquiredForAttempt = false
         try {
+            updateSessionState(sessionId) {
+                it.copy(
+                    status = SessionStatus.CONNECTING,
+                    errorMessage = null,
+                    networkWarning = null,
+                    showOpenTailscaleAction = false,
+                    showInstallTailscaleAction = false
+                )
+            }
+
+            if (tailscaleCoordinator != null) {
+                var lastNotifiedStage: TailscaleProgressState? = null
+                val prep = tailscaleCoordinator.prepareVpnForSession(
+                    sessionId = sessionId,
+                    profile = profile,
+                    onProgress = { stage ->
+                        updateSessionState(sessionId) {
+                            it.copy(
+                                status = SessionStatus.CONNECTING,
+                                tailscaleState = stage,
+                                vpnOwnership = tailscaleCoordinator.diagnosticSnapshot.value.ownership
+                            )
+                        }
+                        if (stage.isInProgress && stage != lastNotifiedStage) {
+                            lastNotifiedStage = stage
+                            scope.launch(Dispatchers.Main) {
+                                runtime.terminalHandle.writeLocalNotice("[Tailscale] ${stage.label}")
+                            }
+                        }
+                    }
+                )
+                when (prep) {
+                    is TailscalePreparationResult.Failed -> {
+                        updateSessionState(sessionId) {
+                            it.copy(
+                                status = SessionStatus.ERROR,
+                                tailscaleState = prep.progressState,
+                                errorMessage = prep.errorMessage,
+                                showOpenTailscaleAction = prep.canOpenTailscale,
+                                showInstallTailscaleAction = prep.canInstallTailscale
+                            )
+                        }
+                        withContext(Dispatchers.Main) {
+                            runtime.terminalHandle.writeLocalNotice("[Tailscale ผิดพลาด] ${prep.errorMessage}")
+                        }
+                        return
+                    }
+                    is TailscalePreparationResult.Proceed -> {
+                        leaseAcquiredForAttempt = prep.leaseGranted
+                        updateSessionState(sessionId) {
+                            it.copy(
+                                tailscaleState = prep.progressState,
+                                vpnOwnership = prep.ownership,
+                                tailscaleNotice = prep.noticeMessage
+                            )
+                        }
+                        if (!prep.noticeMessage.isNullOrBlank()) {
+                            withContext(Dispatchers.Main) {
+                                runtime.terminalHandle.writeLocalNotice("[Tailscale] ${prep.noticeMessage}")
+                            }
+                        }
+                    }
+                }
+            }
+
             updateSessionState(sessionId) {
                 it.copy(status = SessionStatus.VERIFYING_HOST, errorMessage = null, networkWarning = null)
             }
@@ -456,6 +558,7 @@ class SshSessionManager(
                         )
                     }
                     client.disconnect()
+                    if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                     return
                 }
                 is ConnectResult.AlgorithmMismatch -> {
@@ -466,6 +569,7 @@ class SshSessionManager(
                         )
                     }
                     client.disconnect()
+                    if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                     return
                 }
                 is ConnectResult.ProtocolError -> {
@@ -476,6 +580,7 @@ class SshSessionManager(
                         )
                     }
                     client.disconnect()
+                    if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                     return
                 }
                 is ConnectResult.TransportError -> {
@@ -486,6 +591,7 @@ class SshSessionManager(
                         )
                     }
                     client.disconnect()
+                    if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                     return
                 }
             }
@@ -501,6 +607,7 @@ class SshSessionManager(
                     val keyEncrypted = runCatching { client.isPrivateKeyEncrypted(pem) }.getOrDefault(false)
                     if (keyEncrypted && passphraseStr.isNullOrEmpty()) {
                         client.disconnect()
+                        if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                         updateSessionState(sessionId) {
                             it.copy(
                                 status = SessionStatus.IDLE,
@@ -539,6 +646,7 @@ class SshSessionManager(
                             it.copy(status = SessionStatus.ERROR, errorMessage = "เปิด SSH Session Channel ไม่สำเร็จ")
                         }
                         client.disconnect()
+                        if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                         return
                     }
                     runtime.shellSession = session
@@ -559,6 +667,7 @@ class SshSessionManager(
                         }
                         session.close()
                         client.disconnect()
+                        if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                         return
                     }
 
@@ -567,7 +676,8 @@ class SshSessionManager(
                             status = SessionStatus.CONNECTED,
                             connectedAtMs = System.currentTimeMillis(),
                             meta = meta,
-                            errorMessage = null
+                            errorMessage = null,
+                            tailscaleState = if (leaseAcquiredForAttempt) TailscaleProgressState.CONNECTED else it.tailscaleState
                         )
                     }
 
@@ -580,6 +690,7 @@ class SshSessionManager(
                 }
                 is AuthResult.Failure -> {
                     client.disconnect()
+                    if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                     updateSessionState(sessionId) {
                         it.copy(
                             status = SessionStatus.ERROR,
@@ -589,6 +700,7 @@ class SshSessionManager(
                 }
                 is AuthResult.Error -> {
                     client.disconnect()
+                    if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
                     updateSessionState(sessionId) {
                         it.copy(
                             status = SessionStatus.ERROR,
@@ -599,6 +711,7 @@ class SshSessionManager(
             }
         } catch (t: Throwable) {
             runCatching { runtime.sshClient?.disconnect() }
+            if (leaseAcquiredForAttempt) tailscaleCoordinator?.onSessionEnded(sessionId)
             updateSessionState(sessionId) {
                 it.copy(
                     status = SessionStatus.ERROR,
@@ -643,16 +756,19 @@ class SshSessionManager(
         val disconnectJob = scope.launch {
             try {
                 client.disconnectedFlow.collect { cause ->
-                    updateSessionState(runtime.sessionId) {
-                        if (it.status == SessionStatus.CONNECTED || it.status == SessionStatus.RECONNECTING) {
+                    val currentStatus = _sessions.value.firstOrNull { it.sessionId == runtime.sessionId }?.status
+                    if (currentStatus == SessionStatus.CONNECTED) {
+                        updateSessionState(runtime.sessionId) {
                             it.copy(
                                 status = SessionStatus.DISCONNECTED,
-                                errorMessage = cause?.message?.let { msg -> Formatters.redactDiagnosticText(msg) }
+                                errorMessage = cause?.message?.let { msg -> Formatters.redactDiagnosticText(msg) },
+                                tailscaleState = TailscaleProgressState.IDLE
                             )
-                        } else it
-                    }
-                    withContext(Dispatchers.Main) {
-                        runtime.terminalHandle.writeLocalNotice("\r\n[เซิร์ฟเวอร์ปิดการเชื่อมต่อ]")
+                        }
+                        tailscaleCoordinator?.onSessionEnded(runtime.sessionId)
+                        withContext(Dispatchers.Main) {
+                            runtime.terminalHandle.writeLocalNotice("\r\n[เซิร์ฟเวอร์ปิดการเชื่อมต่อ]")
+                        }
                     }
                 }
             } catch (_: Throwable) {
@@ -665,8 +781,9 @@ class SshSessionManager(
                 delay(150)
                 if (_sessions.value.firstOrNull { it.sessionId == runtime.sessionId }?.status == SessionStatus.CONNECTED) {
                     updateSessionState(runtime.sessionId) {
-                        it.copy(status = SessionStatus.DISCONNECTED)
+                        it.copy(status = SessionStatus.DISCONNECTED, tailscaleState = TailscaleProgressState.IDLE)
                     }
+                    tailscaleCoordinator?.onSessionEnded(runtime.sessionId)
                 }
             } catch (_: Throwable) {
             }

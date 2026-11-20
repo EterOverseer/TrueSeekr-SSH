@@ -65,6 +65,10 @@ class TerminalViewModel(
         sshSessionManager.closeSessionTab(sessionId)
     }
 
+    fun openTailscaleApp(): Boolean = sshSessionManager.openTailscaleApp()
+
+    fun openTailscalePlayStore(): Boolean = sshSessionManager.openTailscalePlayStore()
+
     fun toggleSearch() {
         val next = !_searchVisible.value
         _searchVisible.value = next

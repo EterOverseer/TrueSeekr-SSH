@@ -4,7 +4,13 @@ import android.content.Context
 import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -25,6 +31,7 @@ import com.example.domain.AppThemeMode
 import com.example.domain.AuthMethodType
 import com.example.domain.SessionStatus
 import com.example.domain.SshProfile
+import com.example.profiles.ProfileEditorDraft
 import com.example.profiles.ServersViewModel
 import com.example.security.CredentialVault
 import com.example.security.SoftwareAesGcmCryptoEngine
@@ -33,6 +40,7 @@ import com.example.settings.SettingsViewModel
 import com.example.ssh.SshSessionManager
 import com.example.ui.components.ConnectionStatusPill
 import com.example.ui.components.HostTrustIndicator
+import com.example.ui.screens.ProfileEditorDialog
 import com.example.ui.screens.ServersScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.PocketSshTheme
@@ -44,6 +52,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -225,6 +235,7 @@ class ObsidianRedesignUiTest {
             .performClick()
 
         composeRule.waitUntil(5000L) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
             val current = settingsViewModel.settings.value
             current.themeMode == AppThemeMode.LIGHT && current.accentPreset == AppAccentPreset.LIME
         }
@@ -232,5 +243,79 @@ class ObsidianRedesignUiTest {
         val finalSettings = runBlocking { prefsRepo.settings.first() }
         assertEquals(AppThemeMode.LIGHT, finalSettings.themeMode)
         assertEquals(AppAccentPreset.LIME, finalSettings.accentPreset)
+    }
+
+    @Test
+    fun settingsScreen_tailscaleControls_toggleAndPersistInDataStore() {
+        composeRule.setContent {
+            PocketSshTheme {
+                SettingsScreen(viewModel = settingsViewModel)
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("settings_list")
+            .performScrollToNode(hasTestTag("settings_tailscale_timeout_45"))
+
+        composeRule.onNodeWithTag("settings_tailscale_master_switch").assertIsOff()
+        composeRule.onNodeWithTag("settings_tailscale_auto_disconnect_switch").assertIsNotEnabled()
+        composeRule.onNodeWithTag("settings_tailscale_timeout_45").assertIsNotEnabled()
+
+        composeRule.onNodeWithTag("settings_tailscale_master_switch").performClick()
+        composeRule.waitUntil(5000L) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            settingsViewModel.settings.value.tailscaleAutomationEnabled
+        }
+
+        composeRule.onNodeWithTag("settings_tailscale_auto_disconnect_switch").assertIsEnabled()
+        composeRule.onNodeWithTag("settings_tailscale_auto_disconnect_switch").performClick()
+        composeRule.onNodeWithTag("settings_tailscale_timeout_45").performClick()
+
+        composeRule.waitUntil(5000L) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            val s = settingsViewModel.settings.value
+            s.tailscaleAutomationEnabled && !s.tailscaleAutoDisconnect && s.tailscaleConnectTimeoutSec == 45
+        }
+
+        val persisted = runBlocking { prefsRepo.settings.first() }
+        assertTrue(persisted.tailscaleAutomationEnabled)
+        assertFalse(persisted.tailscaleAutoDisconnect)
+        assertEquals(45, persisted.tailscaleConnectTimeoutSec)
+    }
+
+    @Test
+    fun profileEditor_tailscaleSwitch_respectsGlobalMasterSwitch() {
+        var latestDraft by mutableStateOf(ProfileEditorDraft())
+        var globalEnabled by mutableStateOf(false)
+
+        composeRule.setContent {
+            PocketSshTheme {
+                ProfileEditorDialog(
+                    draft = latestDraft,
+                    groups = emptyList(),
+                    globalTailscaleEnabled = globalEnabled,
+                    onUpdate = { transform -> latestDraft = transform(latestDraft) },
+                    onCancel = {},
+                    onSaveProfile = {},
+                    onSaveAndConnect = {}
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("editor_auto_tailscale_switch")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertIsOff()
+
+        globalEnabled = true
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("editor_auto_tailscale_switch")
+            .assertIsEnabled()
+            .performClick()
+
+        composeRule.waitForIdle()
+        assertTrue(latestDraft.autoTailscaleConnect)
+        composeRule.onNodeWithTag("editor_auto_tailscale_switch").assertIsOn()
     }
 }

@@ -1212,6 +1212,13 @@ private fun ProfileCard(
                     },
                     icon = Icons.Default.Key
                 )
+                if (profile.autoTailscaleConnect) {
+                    ObsidianMetadataTag(
+                        text = "Tailscale",
+                        icon = Icons.Default.Hub,
+                        tint = colors.cyan
+                    )
+                }
                 HostTrustIndicator(isTrusted = isHostTrusted)
             }
 

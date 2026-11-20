@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         KnownHostEntity::class,
         CommandSnippetEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 abstract class PocketSshDatabase : RoomDatabase() {
@@ -36,11 +36,13 @@ abstract class PocketSshDatabase : RoomDatabase() {
         )
 
         /**
-         * Example forward migration placeholder demonstrating non-destructive schema evolution.
+         * Backward-compatible non-destructive migration adding per-profile Tailscale auto-connect support.
          */
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Reserved for future non-destructive column additions in schema v2
+                db.execSQL(
+                    "ALTER TABLE ssh_profiles ADD COLUMN autoTailscaleConnect INTEGER NOT NULL DEFAULT 0"
+                )
             }
         }
 
@@ -50,6 +52,7 @@ abstract class PocketSshDatabase : RoomDatabase() {
                 PocketSshDatabase::class.java,
                 "pocketssh.db"
             )
+                .addMigrations(MIGRATION_1_2)
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)

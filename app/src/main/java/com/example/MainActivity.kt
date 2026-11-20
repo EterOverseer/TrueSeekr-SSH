@@ -202,7 +202,8 @@ private fun PocketSshRoot(
             container.preferencesRepository,
             container.knownHostRepository,
             container.profileRepository,
-            container.credentialVault
+            container.credentialVault,
+            container.tailscaleCoordinator
         )
     )
 
@@ -408,6 +409,7 @@ private fun PocketSshRoot(
             ProfileEditorDialog(
                 draft = draft,
                 groups = serversUiState.groups,
+                globalTailscaleEnabled = settings.tailscaleAutomationEnabled,
                 onUpdate = { serversViewModel.updateEditorDraft(it) },
                 onCancel = { serversViewModel.closeEditor() },
                 onSaveProfile = {

@@ -51,6 +51,7 @@ data class ProfileEditorDraft(
     val terminalFontSizeSp: Float = 13f,
     val terminalTheme: TerminalThemePreset = TerminalThemePreset.CHARCOAL_LIME,
     val initialWorkingDir: String = "",
+    val autoTailscaleConnect: Boolean = false,
     val passwordInput: String = "",
     val privateKeyInput: String = "",
     val passphraseInput: String = "",
@@ -94,6 +95,10 @@ class ServersViewModel(
 
     private val _editorDraft = MutableStateFlow<ProfileEditorDraft?>(null)
     val editorDraft: StateFlow<ProfileEditorDraft?> = _editorDraft.asStateFlow()
+
+    val tailscaleAutomationEnabled: StateFlow<Boolean> = preferencesRepository.settings
+        .combine(MutableStateFlow(Unit)) { settings, _ -> settings.tailscaleAutomationEnabled }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     private val knownHostsFlow = knownHostRepository?.allKnownHosts ?: flowOf(emptyList())
 
@@ -211,6 +216,7 @@ class ServersViewModel(
                 terminalType = defaults.defaultTermType,
                 terminalFontSizeSp = defaults.defaultTerminalFontSizeSp,
                 terminalTheme = defaults.defaultTerminalTheme,
+                autoTailscaleConnect = false,
                 isPersistedReady = false
             )
         }
@@ -235,6 +241,7 @@ class ServersViewModel(
             terminalFontSizeSp = profile.terminalFontSizeSp,
             terminalTheme = profile.terminalTheme,
             initialWorkingDir = profile.initialWorkingDir,
+            autoTailscaleConnect = profile.autoTailscaleConnect,
             existingCredentialRefId = profile.credentialRefId,
             hasStoredCredential = hasCred,
             isPersistedReady = true
@@ -311,6 +318,7 @@ class ServersViewModel(
                     terminalFontSizeSp = draft.terminalFontSizeSp.coerceIn(9f, 24f),
                     terminalTheme = draft.terminalTheme,
                     initialWorkingDir = draft.initialWorkingDir.trim(),
+                    autoTailscaleConnect = draft.autoTailscaleConnect,
                     credentialRefId = draft.existingCredentialRefId,
                     createdAt = existing?.createdAt ?: System.currentTimeMillis(),
                     updatedAt = System.currentTimeMillis(),

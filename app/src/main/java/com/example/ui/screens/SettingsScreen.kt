@@ -78,6 +78,8 @@ import com.example.domain.AppThemeMode
 import com.example.domain.TerminalCursorStyle
 import com.example.domain.TerminalFontFamily
 import com.example.domain.TerminalThemePreset
+import com.example.network.TailscaleInstallState
+import com.example.network.VpnOwnership
 import com.example.security.BiometricLockManager
 import com.example.settings.AutoLockTimeout
 import com.example.settings.SettingsViewModel
@@ -100,6 +102,7 @@ fun SettingsScreen(
     val colors = LocalObsidianColors.current
     val context = LocalContext.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val tailscaleDiagnostics by viewModel.tailscaleDiagnostics.collectAsStateWithLifecycle()
     val knownHosts by viewModel.knownHosts.collectAsStateWithLifecycle()
     val vaultCount by viewModel.vaultCount.collectAsStateWithLifecycle()
     val feedback by viewModel.feedbackMessage.collectAsStateWithLifecycle()
@@ -111,6 +114,7 @@ fun SettingsScreen(
 
     LaunchedEffect(Unit) {
         viewModel.refreshVaultCount()
+        viewModel.refreshTailscaleDiagnostics()
     }
 
     Scaffold(
@@ -134,7 +138,8 @@ fun SettingsScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .padding(innerPadding)
+                .testTag("settings_list"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -574,13 +579,120 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Icon(Icons.Default.Hub, null, tint = colors.cyan)
-                            Text("การเชื่อมต่อ LAN / VPN / Tailscale", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                            Text("Tailscale Integration (Official App)", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
                         }
                         Text(
-                            text = "TrueSeekrSSH รองรับการเชื่อมต่อผ่าน LAN, Wi-Fi, VPN และ Tailscale โดยใช้แอป Tailscale อย่างเป็นทางการบน Android เป็น VPN Provider สามารถระบุ Tailnet IP (100.x.y.z) หรือชื่อ MagicDNS ได้โดยตรง",
+                            text = "ใช้แอป Tailscale อย่างเป็นทางการบน Android ผ่าน AutomationActivity โดยไม่ฝัง WireGuard ลงในแอป และไม่ตัดการเชื่อมต่อ VPN ที่ผู้ใช้เปิดไว้เองภายนอก",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.textSecondary
                         )
+
+                        SettingsSwitchRow(
+                            title = "เปิดใช้งาน Tailscale Integration (Master Switch)",
+                            subtitle = "อนุญาตให้โปรไฟล์ที่ตั้งค่าไว้สั่งเปิด/ปิด Tailscale อัตโนมัติ",
+                            checked = settings.tailscaleAutomationEnabled,
+                            onCheckedChange = { viewModel.setTailscaleAutomationEnabled(it) },
+                            switchModifier = Modifier.testTag("settings_tailscale_master_switch")
+                        )
+
+                        SettingsSwitchRow(
+                            title = "ปิด Tailscale อัตโนมัติเมื่อจบเซสชันสุดท้าย",
+                            subtitle = "ปิดเฉพาะเมื่อแอปเป็นคนเริ่มและไม่มี Terminal แท็บที่ใช้งาน VPN เหลืออยู่",
+                            checked = settings.tailscaleAutoDisconnect,
+                            enabled = settings.tailscaleAutomationEnabled,
+                            onCheckedChange = { viewModel.setTailscaleAutoDisconnect(it) },
+                            switchModifier = Modifier.testTag("settings_tailscale_auto_disconnect_switch")
+                        )
+
+                        Text(
+                            text = "เวลารอ Tailscale VPN (Timeout)",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = if (settings.tailscaleAutomationEnabled) colors.textPrimary else colors.textSecondary
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(15, 30, 45, 60).forEach { sec ->
+                                FilterChip(
+                                    selected = settings.tailscaleConnectTimeoutSec == sec,
+                                    enabled = settings.tailscaleAutomationEnabled,
+                                    onClick = { viewModel.setTailscaleConnectTimeoutSec(sec) },
+                                    label = { Text("${sec}s") },
+                                    modifier = Modifier.testTag("settings_tailscale_timeout_$sec")
+                                )
+                            }
+                        }
+
+                        Surface(
+                            color = colors.elevated,
+                            shape = RoundedCornerShape(ObsidianRadius.md),
+                            border = BorderStroke(1.dp, colors.subtleBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("สถานะ Tailscale & VPN ปัจจุบัน", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                                    TextButton(onClick = { viewModel.refreshTailscaleDiagnostics() }) {
+                                        Text("รีเฟรช")
+                                    }
+                                }
+                                Text(
+                                    text = "• แอป Tailscale: ${tailscaleDiagnostics.installState.label}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (tailscaleDiagnostics.installState == TailscaleInstallState.INSTALLED) colors.lime else colors.amber
+                                )
+                                Text(
+                                    text = "• สถานะ VPN Transport: ${if (tailscaleDiagnostics.vpnStatus.hasTransportVpn) "เชื่อมต่อ VPN อยู่" else "ไม่มี VPN เชื่อมต่อ"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (tailscaleDiagnostics.vpnStatus.hasTransportVpn) colors.cyan else colors.textSecondary
+                                )
+                                Text(
+                                    text = "• Ownership: ${tailscaleDiagnostics.ownership.label}" +
+                                        if (tailscaleDiagnostics.activeLeaseCount > 0) " (${tailscaleDiagnostics.activeLeaseCount} เซสชัน)" else "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = when (tailscaleDiagnostics.ownership) {
+                                        VpnOwnership.APP_REQUESTED -> colors.lime
+                                        VpnOwnership.EXTERNAL, VpnOwnership.UNKNOWN -> colors.amber
+                                        VpnOwnership.NONE -> colors.textSecondary
+                                    }
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (tailscaleDiagnostics.installState == TailscaleInstallState.NOT_INSTALLED) {
+                                        OutlinedButton(
+                                            onClick = { viewModel.openTailscalePlayStore() },
+                                            modifier = Modifier.height(48.dp)
+                                        ) {
+                                            Text("ติดตั้ง Tailscale")
+                                        }
+                                    } else {
+                                        OutlinedButton(
+                                            onClick = { viewModel.openTailscaleApp() },
+                                            modifier = Modifier.height(48.dp)
+                                        ) {
+                                            Text("เปิดแอป Tailscale")
+                                        }
+                                    }
+                                    if (tailscaleDiagnostics.ownership == VpnOwnership.APP_REQUESTED &&
+                                        tailscaleDiagnostics.vpnStatus.hasTransportVpn
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = { viewModel.disconnectOwnedTailscaleVpn() },
+                                            modifier = Modifier.height(48.dp)
+                                        ) {
+                                            Text("ปิด VPN ตอนนี้", color = colors.amber)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -729,7 +841,9 @@ private fun SettingsSwitchRow(
     title: String,
     subtitle: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
+    switchModifier: Modifier = Modifier
 ) {
     val colors = LocalObsidianColors.current
     Row(
@@ -738,9 +852,18 @@ private fun SettingsSwitchRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.textPrimary)
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) colors.textPrimary else colors.textSecondary
+            )
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = colors.textSecondary)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange,
+            modifier = switchModifier
+        )
     }
 }

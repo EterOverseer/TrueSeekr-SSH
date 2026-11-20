@@ -46,7 +46,10 @@ data class AppSettings(
     val cursorStyle: TerminalCursorStyle = TerminalCursorStyle.BLOCK,
     val hapticKeyFeedback: Boolean = true,
     val defaultConnectTimeoutSec: Int = 15,
-    val autoReconnectPrompt: Boolean = true
+    val autoReconnectPrompt: Boolean = true,
+    val tailscaleAutomationEnabled: Boolean = false,
+    val tailscaleAutoDisconnect: Boolean = true,
+    val tailscaleConnectTimeoutSec: Int = 30
 )
 
 class AppPreferencesRepository(
@@ -76,6 +79,9 @@ class AppPreferencesRepository(
         val HAPTIC_KEY_FEEDBACK = booleanPreferencesKey("haptic_key_feedback")
         val DEFAULT_TIMEOUT_SEC = intPreferencesKey("default_timeout_sec")
         val AUTO_RECONNECT_PROMPT = booleanPreferencesKey("auto_reconnect_prompt")
+        val TAILSCALE_AUTOMATION_ENABLED = booleanPreferencesKey("tailscale_automation_enabled")
+        val TAILSCALE_AUTO_DISCONNECT = booleanPreferencesKey("tailscale_auto_disconnect")
+        val TAILSCALE_CONNECT_TIMEOUT_SEC = intPreferencesKey("tailscale_connect_timeout_sec")
     }
 
     val settings: Flow<AppSettings> = dataStore.data.map { prefs ->
@@ -111,7 +117,10 @@ class AppPreferencesRepository(
                 ?: TerminalCursorStyle.BLOCK,
             hapticKeyFeedback = prefs[Keys.HAPTIC_KEY_FEEDBACK] ?: true,
             defaultConnectTimeoutSec = prefs[Keys.DEFAULT_TIMEOUT_SEC] ?: 15,
-            autoReconnectPrompt = prefs[Keys.AUTO_RECONNECT_PROMPT] ?: true
+            autoReconnectPrompt = prefs[Keys.AUTO_RECONNECT_PROMPT] ?: true,
+            tailscaleAutomationEnabled = prefs[Keys.TAILSCALE_AUTOMATION_ENABLED] ?: false,
+            tailscaleAutoDisconnect = prefs[Keys.TAILSCALE_AUTO_DISCONNECT] ?: true,
+            tailscaleConnectTimeoutSec = (prefs[Keys.TAILSCALE_CONNECT_TIMEOUT_SEC] ?: 30).coerceIn(10, 120)
         )
     }
 
@@ -211,5 +220,17 @@ class AppPreferencesRepository(
 
     suspend fun setAutoReconnectPrompt(enabled: Boolean) {
         dataStore.edit { it[Keys.AUTO_RECONNECT_PROMPT] = enabled }
+    }
+
+    suspend fun setTailscaleAutomationEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.TAILSCALE_AUTOMATION_ENABLED] = enabled }
+    }
+
+    suspend fun setTailscaleAutoDisconnect(enabled: Boolean) {
+        dataStore.edit { it[Keys.TAILSCALE_AUTO_DISCONNECT] = enabled }
+    }
+
+    suspend fun setTailscaleConnectTimeoutSec(seconds: Int) {
+        dataStore.edit { it[Keys.TAILSCALE_CONNECT_TIMEOUT_SEC] = seconds.coerceIn(10, 120) }
     }
 }

@@ -1,4 +1,4 @@
-# PocketSSH — Security Architecture
+# TrueSeekrSSH — Security Architecture
 
 ## 1. Separation of Concerns
 
@@ -29,3 +29,12 @@
 - **Screenshot & Recents Protection:** Opt-in `FLAG_SECURE` toggle in Settings (`protectScreenshots`, disabled by default for remote display/emulator compatibility and configurable anytime).
 - **Log Redaction:** `Formatters.redactDiagnosticText()` strips password/passphrase/PEM patterns before displaying transport errors.
 - **Storage Access Framework (SAF):** File and private-key picking uses `OpenDocument` / `CreateDocument` without broad storage permissions.
+
+## 5. External Tailscale VPN Boundary & Ownership Protection
+
+- **Zero Embedded VPN Code:** TrueSeekrSSH does not embed Tailscale, WireGuard, or `VpnService`. It delegates VPN operation solely to the official `com.tailscale.ipn` Android package via explicit Intents to `com.tailscale.ipn.AutomationActivity`.
+- **Least-Privilege Manifest Visibility:** Uses `<queries><package android:name="com.tailscale.ipn" /></queries>` rather than `QUERY_ALL_PACKAGES`.
+- **Zero-Interference Ownership Rules:**
+  - Any VPN active before TrueSeekrSSH initiates `CONNECT_VPN` is classified as `EXTERNAL`.
+  - Cross-process restarts while a VPN remains active downgrade ownership to `UNKNOWN`.
+  - Auto-disconnect (`com.tailscale.ipn.DISCONNECT_VPN`) is blocked unless `ownership == APP_REQUESTED` within the active process lifetime, zero active/pending Tailscale leases remain, and the user has `Auto Disconnect` enabled.
