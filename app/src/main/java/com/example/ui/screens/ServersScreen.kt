@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -33,10 +34,13 @@ import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.History
@@ -49,6 +53,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Speed
@@ -56,6 +61,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
@@ -108,6 +114,7 @@ import com.example.domain.ProfileGroup
 import com.example.domain.ProfileSortOrder
 import com.example.domain.SessionStatus
 import com.example.domain.SshProfile
+import com.example.profiles.PendingDeleteConfirmation
 import com.example.profiles.ServersUiState
 import com.example.profiles.ServersViewModel
 import com.example.security.BackupCryptoManager
@@ -147,9 +154,10 @@ fun ServersScreen(
     var sortMenuExpanded by remember { mutableStateOf(false) }
     var showGroupDialog by remember { mutableStateOf(false) }
     var showBackupDialog by remember { mutableStateOf(false) }
+    var exportTargetProfileIds by remember { mutableStateOf<Set<String>?>(null) }
     var actionSheetProfile by remember { mutableStateOf<SshProfile?>(null) }
     var profileForDetails by remember { mutableStateOf<SshProfile?>(null) }
-    var profileToDelete by remember { mutableStateOf<SshProfile?>(null) }
+    var profileToDuplicate by remember { mutableStateOf<SshProfile?>(null) }
     var profileToRename by remember { mutableStateOf<SshProfile?>(null) }
     var profileToMoveGroup by remember { mutableStateOf<SshProfile?>(null) }
     var pendingExportPayload by remember { mutableStateOf<String?>(null) }
@@ -157,6 +165,10 @@ fun ServersScreen(
 
     val pendingImportReview by viewModel.pendingImportReview.collectAsState()
     var importParseError by remember { mutableStateOf<String?>(null) }
+
+    BackHandler(enabled = uiState.isSelectionMode) {
+        viewModel.exitSelectionMode()
+    }
 
     val exportSafLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("*/*")
@@ -221,25 +233,48 @@ fun ServersScreen(
     Scaffold(
         containerColor = colors.background,
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { viewModel.openCreateEditor() },
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text("เพิ่มเซิร์ฟเวอร์", fontWeight = FontWeight.SemiBold) },
-                containerColor = colors.cyan,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                shape = RoundedCornerShape(ObsidianRadius.lg),
-                modifier = Modifier.testTag("add_profile_fab")
-            )
+            if (!uiState.isSelectionMode) {
+                ExtendedFloatingActionButton(
+                    onClick = { viewModel.openCreateEditor() },
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = { Text("เพิ่มเซิร์ฟเวอร์", fontWeight = FontWeight.SemiBold) },
+                    containerColor = colors.cyan,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    shape = RoundedCornerShape(ObsidianRadius.lg),
+                    modifier = Modifier.testTag("add_profile_fab")
+                )
+            }
         }
     ) { innerPadding ->
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .testTag("servers_list"),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            if (uiState.isSelectionMode) {
+                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    BulkSelectionActionBar(
+                        selectedCount = uiState.selectedProfileIds.size,
+                        totalVisibleCount = uiState.filteredProfiles.size,
+                        onSelectAll = { viewModel.selectAllVisible() },
+                        onDeselectAll = { viewModel.deselectAll() },
+                        onExportSelected = {
+                            exportTargetProfileIds = uiState.selectedProfileIds
+                            showBackupDialog = true
+                        },
+                        onDeleteSelected = { viewModel.requestBulkDelete() },
+                        onCancelSelection = { viewModel.exitSelectionMode() }
+                    )
+                }
+            }
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .testTag("servers_list"),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 96.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
             // 1. Command Center Hero Header
             item {
                 CommandCenterHeader(
@@ -250,7 +285,10 @@ fun ServersScreen(
                     onSortExpandedChange = { sortMenuExpanded = it },
                     onSelectSortOrder = { viewModel.setSortOrder(it) },
                     onOpenGroups = { showGroupDialog = true },
-                    onOpenBackup = { showBackupDialog = true },
+                    onOpenBackup = {
+                        exportTargetProfileIds = null
+                        showBackupDialog = true
+                    },
                     onOpenSettings = onOpenSettings
                 )
             }
@@ -281,6 +319,29 @@ fun ServersScreen(
                         icon = Icons.Default.Warning,
                         accentColor = if (attentionCount > 0) colors.red else colors.textSecondary,
                         modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            if (!uiState.errorBanner.isNullOrBlank()) {
+                item {
+                    ObsidianStatusBanner(
+                        message = uiState.errorBanner,
+                        tone = BannerTone.ERROR,
+                        onDismiss = { viewModel.clearErrorBanner() }
+                    )
+                }
+            }
+
+            uiState.undoDeleteState?.let { undoState ->
+                item {
+                    ObsidianStatusBanner(
+                        message = undoState.message,
+                        tone = BannerTone.WARNING,
+                        actionLabel = "เลิกทำ (Undo)",
+                        actionTestTag = "undo_delete_button",
+                        onAction = { viewModel.undoLastDelete() },
+                        onDismiss = { viewModel.dismissUndo() }
                     )
                 }
             }
@@ -420,7 +481,25 @@ fun ServersScreen(
                         title = "All Servers",
                         icon = Icons.Default.Dns,
                         count = uiState.filteredProfiles.size,
-                        accentColor = colors.cyan
+                        accentColor = colors.cyan,
+                        trailingAction = {
+                            if (uiState.allProfiles.isNotEmpty() && !uiState.isSelectionMode) {
+                                TextButton(
+                                    onClick = { viewModel.enterSelectionMode() },
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("toggle_selection_mode_button")
+                                ) {
+                                    Icon(
+                                        Icons.Default.Checklist,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("เลือกหลายรายการ")
+                                }
+                            }
+                        }
                     )
                     OutlinedTextField(
                         value = uiState.searchQuery,
@@ -488,6 +567,10 @@ fun ServersScreen(
                         profile = profile,
                         sessionStatus = matchingSession?.status,
                         isHostTrusted = isTrusted,
+                        isSelectionMode = uiState.isSelectionMode,
+                        isSelected = profile.id in uiState.selectedProfileIds,
+                        onToggleSelected = { viewModel.toggleProfileSelection(profile.id) },
+                        onEnterSelectionMode = { viewModel.enterSelectionMode(profile.id) },
                         onConnect = { viewModel.connectSavedProfile(profile, onNavigateToTerminal) },
                         onToggleFavorite = { viewModel.toggleFavorite(profile) },
                         onOpenActions = { actionSheetProfile = profile },
@@ -495,6 +578,7 @@ fun ServersScreen(
                     )
                 }
             }
+        }
         }
     }
 
@@ -549,9 +633,14 @@ fun ServersScreen(
                     icon = Icons.Default.ContentCopy,
                     tint = colors.textPrimary,
                     label = "คัดลอกโปรไฟล์ (Duplicate)",
+                    testTag = "sheet_duplicate_profile_button",
                     onClick = {
                         actionSheetProfile = null
-                        viewModel.duplicateProfile(profile)
+                        if (profile.credentialRefId != null) {
+                            profileToDuplicate = profile
+                        } else {
+                            viewModel.duplicateProfile(profile, includeCredential = false)
+                        }
                     }
                 )
                 SheetActionRow(
@@ -587,9 +676,10 @@ fun ServersScreen(
                     icon = Icons.Default.Delete,
                     tint = colors.red,
                     label = "ลบโปรไฟล์",
+                    testTag = "sheet_delete_profile_button",
                     onClick = {
                         actionSheetProfile = null
-                        profileToDelete = profile
+                        viewModel.requestDeleteProfile(profile)
                     }
                 )
             }
@@ -638,58 +728,50 @@ fun ServersScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    val target = profile
-                    profileForDetails = null
-                    viewModel.openEditEditor(target)
-                }) {
-                    Text("แก้ไข")
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = {
+                            val target = profile
+                            profileForDetails = null
+                            viewModel.requestDeleteProfile(target)
+                        },
+                        modifier = Modifier.testTag("details_delete_profile_button")
+                    ) {
+                        Text("ลบ", color = colors.red)
+                    }
+                    TextButton(onClick = {
+                        val target = profile
+                        profileForDetails = null
+                        viewModel.openEditEditor(target)
+                    }) {
+                        Text("แก้ไข")
+                    }
                 }
             }
         )
     }
 
-    // Delete confirmation dialog
-    profileToDelete?.let { profile ->
-        var removeCredential by remember { mutableStateOf(true) }
-        AlertDialog(
-            onDismissRequest = { profileToDelete = null },
-            containerColor = colors.surface,
-            title = { Text("ลบโปรไฟล์ \"${profile.name}\"?") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "การลบโปรไฟล์นี้จะไม่ลบข้อมูล Host Key Trust (Known Hosts) ออกโดยอัตโนมัติ",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    if (profile.credentialRefId != null) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = removeCredential, onCheckedChange = { removeCredential = it })
-                            Text(
-                                text = "ลบ Credential (รหัสผ่าน/Private Key) ที่ผูกกับโปรไฟล์นี้ออกจาก Vault ด้วย",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-                }
+    profileToDuplicate?.let { sourceProfile ->
+        DuplicateProfileDialog(
+            profile = sourceProfile,
+            onConfirm = { includeCred ->
+                viewModel.duplicateProfile(sourceProfile, includeCredential = includeCred)
+                profileToDuplicate = null
             },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.deleteProfile(profile, removeCredential)
-                        profileToDelete = null
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = colors.red),
-                    modifier = Modifier.testTag("confirm_delete_profile_button")
-                ) {
-                    Text("ยืนยันการลบ")
-                }
+            onDismiss = { profileToDuplicate = null }
+        )
+    }
+
+    uiState.pendingDelete?.takeIf { !it.fromEditor }?.let { pending ->
+        ProfileDeleteConfirmationDialog(
+            pending = pending,
+            onConfirmDelete = { removeCreds, disconnectActive ->
+                viewModel.confirmPendingDelete(
+                    removeAssociatedCredentials = removeCreds,
+                    disconnectActiveFirst = disconnectActive
+                )
             },
-            dismissButton = {
-                TextButton(onClick = { profileToDelete = null }) {
-                    Text("ยกเลิก")
-                }
-            }
+            onCancel = { viewModel.cancelPendingDelete() }
         )
     }
 
@@ -761,28 +843,38 @@ fun ServersScreen(
     }
 
     if (showBackupDialog) {
-        val exportPreview = remember(uiState.allProfiles) { viewModel.getExportPreview() }
+        val scopedIds = exportTargetProfileIds
+        val exportPreview = remember(uiState.allProfiles, scopedIds) {
+            viewModel.getExportPreview(scopedIds)
+        }
         BackupExportImportDialog(
             exportPreview = exportPreview,
+            isSelectedSubset = scopedIds != null,
             onExportMetadata = {
-                viewModel.buildExportContent(null).onSuccess { jsonText ->
+                viewModel.buildExportContent(null, scopedIds).onSuccess { jsonText ->
                     pendingExportPayload = jsonText
                     exportSafLauncher.launch(BackupCryptoManager.STANDARD_EXPORT_FILENAME)
                     showBackupDialog = false
+                    exportTargetProfileIds = null
                 }
             },
             onExportEncrypted = { pass, includeCreds ->
-                viewModel.buildEncryptedFullBackup(pass, includeCreds).onSuccess { encryptedText ->
+                viewModel.buildEncryptedFullBackup(pass, includeCreds, scopedIds).onSuccess { encryptedText ->
                     pendingExportPayload = encryptedText
                     exportSafLauncher.launch(BackupCryptoManager.ENCRYPTED_BACKUP_FILENAME)
                     showBackupDialog = false
+                    exportTargetProfileIds = null
                 }
             },
             onChooseImportFile = {
                 showBackupDialog = false
+                exportTargetProfileIds = null
                 importSafLauncher.launch(arrayOf("*/*"))
             },
-            onDismiss = { showBackupDialog = false }
+            onDismiss = {
+                showBackupDialog = false
+                exportTargetProfileIds = null
+            }
         )
     }
 
@@ -1202,13 +1294,21 @@ private fun ProfileCard(
     profile: SshProfile,
     sessionStatus: SessionStatus?,
     isHostTrusted: Boolean,
+    isSelectionMode: Boolean = false,
+    isSelected: Boolean = false,
+    onToggleSelected: () -> Unit = {},
+    onEnterSelectionMode: () -> Unit = {},
     onConnect: () -> Unit,
     onToggleFavorite: () -> Unit,
     onOpenActions: () -> Unit,
     onOpenDetails: () -> Unit
 ) {
     val colors = LocalObsidianColors.current
-    val accentBorder = if (sessionStatus?.isLiveConnected == true) colors.lime.copy(alpha = 0.45f) else null
+    val accentBorder = when {
+        isSelectionMode && isSelected -> colors.cyan
+        sessionStatus?.isLiveConnected == true -> colors.lime.copy(alpha = 0.45f)
+        else -> null
+    }
 
     ObsidianSurfaceCard(
         elevated = true,
@@ -1216,7 +1316,8 @@ private fun ProfileCard(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("profile_card_${profile.id}"),
-        onClick = onOpenDetails
+        onClick = if (isSelectionMode) onToggleSelected else onOpenDetails,
+        onLongClick = if (!isSelectionMode) onEnterSelectionMode else null
     ) {
         Column(
             modifier = Modifier.padding(ObsidianSpacing.lg),
@@ -1227,6 +1328,15 @@ private fun ProfileCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                if (isSelectionMode) {
+                    Checkbox(
+                        checked = isSelected,
+                        onCheckedChange = { onToggleSelected() },
+                        modifier = Modifier
+                            .padding(end = 6.dp)
+                            .testTag("select_profile_checkbox_${profile.id}")
+                    )
+                }
                 Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
                     Text(
                         text = profile.name,
@@ -1244,22 +1354,24 @@ private fun ProfileCard(
                     )
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onToggleFavorite,
-                        modifier = Modifier.testTag("favorite_toggle_${profile.id}")
-                    ) {
-                        Icon(
-                            imageVector = if (profile.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
-                            contentDescription = "รายการโปรด",
-                            tint = if (profile.isFavorite) colors.lime else colors.textSecondary
-                        )
-                    }
-                    IconButton(
-                        onClick = onOpenActions,
-                        modifier = Modifier.testTag("profile_more_${profile.id}")
-                    ) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "เมนูเพิ่มเติม", tint = colors.textSecondary)
+                if (!isSelectionMode) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = onToggleFavorite,
+                            modifier = Modifier.testTag("favorite_toggle_${profile.id}")
+                        ) {
+                            Icon(
+                                imageVector = if (profile.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                                contentDescription = "รายการโปรด",
+                                tint = if (profile.isFavorite) colors.lime else colors.textSecondary
+                            )
+                        }
+                        IconButton(
+                            onClick = onOpenActions,
+                            modifier = Modifier.testTag("profile_more_${profile.id}")
+                        ) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "เมนูเพิ่มเติม", tint = colors.textSecondary)
+                        }
                     }
                 }
             }
@@ -1303,20 +1415,22 @@ private fun ProfileCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).padding(end = 8.dp)
                 )
-                Button(
-                    onClick = onConnect,
-                    shape = RoundedCornerShape(ObsidianRadius.md),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = colors.cyan,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    modifier = Modifier
-                        .height(48.dp)
-                        .testTag("connect_profile_${profile.id}")
-                ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Connect", fontWeight = FontWeight.SemiBold)
+                if (!isSelectionMode) {
+                    Button(
+                        onClick = onConnect,
+                        shape = RoundedCornerShape(ObsidianRadius.md),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = colors.cyan,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("connect_profile_${profile.id}")
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Connect", fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }
@@ -1328,6 +1442,7 @@ private fun SheetActionRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     tint: Color,
     label: String,
+    testTag: String? = null,
     onClick: () -> Unit
 ) {
     val colors = LocalObsidianColors.current
@@ -1341,8 +1456,358 @@ private fun SheetActionRow(
         colors = ListItemDefaults.colors(containerColor = colors.surface),
         modifier = Modifier
             .fillMaxWidth()
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
             .clickable(onClick = onClick)
     )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BulkSelectionActionBar(
+    selectedCount: Int,
+    totalVisibleCount: Int,
+    onSelectAll: () -> Unit,
+    onDeselectAll: () -> Unit,
+    onExportSelected: () -> Unit,
+    onDeleteSelected: () -> Unit,
+    onCancelSelection: () -> Unit
+) {
+    val colors = LocalObsidianColors.current
+    ObsidianSurfaceCard(
+        elevated = true,
+        accentBorder = colors.cyan.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(ObsidianRadius.lg),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("bulk_selection_bar")
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "เลือกแล้ว $selectedCount รายการ",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = colors.cyan,
+                    modifier = Modifier.testTag("bulk_selection_count")
+                )
+                TextButton(
+                    onClick = onCancelSelection,
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("bulk_cancel_selection_button")
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("ยกเลิก")
+                }
+            }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onSelectAll,
+                    enabled = totalVisibleCount > 0,
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("bulk_select_all_button")
+                ) {
+                    Icon(Icons.Default.SelectAll, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("เลือกทั้งหมด")
+                }
+                OutlinedButton(
+                    onClick = onDeselectAll,
+                    enabled = selectedCount > 0,
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("bulk_deselect_all_button")
+                ) {
+                    Icon(Icons.Default.Deselect, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("ล้างที่เลือก")
+                }
+                OutlinedButton(
+                    onClick = onExportSelected,
+                    enabled = selectedCount > 0,
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("bulk_export_selected_button")
+                ) {
+                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("ส่งออกที่เลือก")
+                }
+                Button(
+                    onClick = onDeleteSelected,
+                    enabled = selectedCount > 0,
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.red),
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("bulk_delete_selected_button")
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("ลบที่เลือก ($selectedCount)")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DuplicateProfileDialog(
+    profile: SshProfile,
+    onConfirm: (includeCredential: Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = LocalObsidianColors.current
+    var includeCredential by remember(profile.id) { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = colors.surface,
+        title = { Text("คัดลอกโปรไฟล์ \"${profile.name}\"") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "ระบบจะสร้างโปรไฟล์ใหม่ด้วย ID ที่ไม่ซ้ำกัน โดยค่าเริ่มต้นจะไม่คัดลอกรหัสผ่าน/Private Key เพื่อความปลอดภัย",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { includeCredential = !includeCredential }
+                ) {
+                    Checkbox(
+                        checked = includeCredential,
+                        onCheckedChange = { includeCredential = it },
+                        modifier = Modifier.testTag("duplicate_include_credential_checkbox")
+                    )
+                    Text(
+                        text = "คัดลอก Credential ที่เก็บไว้แยกชุดใหม่ไปด้วย",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(includeCredential) },
+                modifier = Modifier.testTag("confirm_duplicate_profile_button")
+            ) {
+                Text("คัดลอก")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("ยกเลิก") }
+        }
+    )
+}
+
+@Composable
+fun ProfileDeleteConfirmationDialog(
+    pending: PendingDeleteConfirmation,
+    onConfirmDelete: (removeAssociatedCredentials: Boolean, disconnectActiveFirst: Boolean) -> Unit,
+    onCancel: () -> Unit
+) {
+    val colors = LocalObsidianColors.current
+    var removeCredentials by remember(pending) { mutableStateOf(true) }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            color = colors.surface,
+            shape = RoundedCornerShape(ObsidianRadius.xl),
+            border = BorderStroke(1.dp, if (pending.hasActiveSessions) colors.red else colors.border),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 24.dp)
+                .widthIn(max = 520.dp)
+                .heightIn(max = 620.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = if (pending.hasActiveSessions) Icons.Default.Warning else Icons.Default.Delete,
+                        contentDescription = null,
+                        tint = colors.red
+                    )
+                    Text(
+                        text = if (pending.isBulk) {
+                            "ลบโปรไฟล์ที่เลือก ${pending.profiles.size} รายการ?"
+                        } else {
+                            "ลบโปรไฟล์ \"${pending.profiles.first().name}\"?"
+                        },
+                        style = MaterialTheme.typography.titleLarge,
+                        color = colors.textPrimary
+                    )
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Surface(
+                        color = colors.elevated,
+                        shape = RoundedCornerShape(ObsidianRadius.md),
+                        border = BorderStroke(1.dp, colors.subtleBorder),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (pending.isBulk) {
+                                Text(
+                                    text = "รายการที่เลือกทั้งหมด ${pending.profiles.size} โปรไฟล์:",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = colors.textPrimary
+                                )
+                                pending.profiles.take(6).forEach { p ->
+                                    Text(
+                                        text = "• ${p.name} (${p.username}@${p.host}:${p.port})",
+                                        style = MonoCodeStyle,
+                                        color = colors.cyan,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (pending.profiles.size > 6) {
+                                    Text(
+                                        text = "...และอีก ${pending.profiles.size - 6} รายการ",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = colors.textSecondary
+                                    )
+                                }
+                            } else {
+                                val p = pending.profiles.first()
+                                Text(
+                                    text = p.name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = colors.textPrimary
+                                )
+                                Text(
+                                    text = "${p.username}@${p.host}:${p.port}",
+                                    style = MonoCodeStyle,
+                                    color = colors.cyan
+                                )
+                            }
+                        }
+                    }
+
+                    if (pending.hasActiveSessions) {
+                        Surface(
+                            color = colors.red.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(ObsidianRadius.md),
+                            border = BorderStroke(1.dp, colors.red.copy(alpha = 0.55f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("active_session_delete_warning")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "กำลังมีเซสชัน SSH เชื่อมต่ออยู่ (${pending.activeSessionsForTargets.size} เซสชัน)",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = colors.red
+                                )
+                                pending.activeSessionsForTargets.forEach { session ->
+                                    Text(
+                                        text = "• ${session.profile.name} — ${session.profile.username}@${session.profile.host}:${session.profile.port}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.textPrimary
+                                    )
+                                }
+                                Text(
+                                    text = "หากดำเนินการต่อ แอปจะตัดการเชื่อมต่อเฉพาะเซสชันของโปรไฟล์ที่ลบเท่านั้น (ไม่กระทบเซสชันอื่น)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.textSecondary
+                                )
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = "การลบจะนำการตั้งค่าโปรไฟล์ที่บันทึกไว้ออกจากแอป TrueSeekrSSH เท่านั้น โดยไม่ลบไฟล์ Private Key ภายนอกของผู้ใช้ ไม่ลบ Known Hosts Trust และไม่ปิดเซสชัน tmux บนเซิร์ฟเวอร์",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.textSecondary
+                    )
+
+                    if (pending.hasAnyStoredCredential) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { removeCredentials = !removeCredentials }
+                        ) {
+                            Checkbox(
+                                checked = removeCredentials,
+                                onCheckedChange = { removeCredentials = it },
+                                modifier = Modifier.testTag("delete_associated_credential_checkbox")
+                            )
+                            Text(
+                                text = "ลบ Credential (รหัสผ่าน/Private Key) ที่แอปจัดการไว้ใน Vault ด้วย",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textPrimary
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                ) {
+                    TextButton(
+                        onClick = onCancel,
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("cancel_delete_profile_button")
+                    ) {
+                        Text("ยกเลิก")
+                    }
+                    Button(
+                        onClick = { onConfirmDelete(removeCredentials, pending.hasActiveSessions) },
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.red),
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag(
+                                if (pending.hasActiveSessions) {
+                                    "confirm_disconnect_and_delete_button"
+                                } else {
+                                    "confirm_delete_profile_button"
+                                }
+                            )
+                    ) {
+                        Text(
+                            if (pending.hasActiveSessions) "ตัดการเชื่อมต่อและลบ" else "ยืนยันการลบ",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1436,6 +1901,7 @@ private fun GroupManagerDialog(
 @Composable
 private fun BackupExportImportDialog(
     exportPreview: ExportBackupPreview,
+    isSelectedSubset: Boolean = false,
     onExportMetadata: () -> Unit,
     onExportEncrypted: (String, Boolean) -> Unit,
     onChooseImportFile: () -> Unit,
@@ -1464,7 +1930,11 @@ private fun BackupExportImportDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "สำรองและกู้คืนโปรไฟล์",
+                    text = if (isSelectedSubset) {
+                        "ส่งออกโปรไฟล์ที่เลือก (${exportPreview.totalProfiles})"
+                    } else {
+                        "สำรองและกู้คืนโปรไฟล์"
+                    },
                     style = MaterialTheme.typography.titleLarge,
                     color = colors.textPrimary
                 )

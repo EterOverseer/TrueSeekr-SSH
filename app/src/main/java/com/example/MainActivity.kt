@@ -411,6 +411,7 @@ private fun PocketSshRoot(
                 draft = draft,
                 groups = serversUiState.groups,
                 globalTailscaleEnabled = settings.tailscaleAutomationEnabled,
+                pendingDeleteConfirmation = serversUiState.pendingDelete,
                 onUpdate = { serversViewModel.updateEditorDraft(it) },
                 onCancel = { serversViewModel.closeEditor() },
                 onSaveProfile = {
@@ -420,7 +421,17 @@ private fun PocketSshRoot(
                     serversViewModel.saveEditorProfile(connectAfterSave = true) {
                         navigateToTop(TerminalRoute)
                     }
-                }
+                },
+                onDeleteProfile = if (draft.existingId != null) {
+                    { serversViewModel.requestDeleteEditingProfile() }
+                } else null,
+                onConfirmPendingDelete = { removeCreds, disconnectActive ->
+                    serversViewModel.confirmPendingDelete(
+                        removeAssociatedCredentials = removeCreds,
+                        disconnectActiveFirst = disconnectActive
+                    )
+                },
+                onCancelPendingDelete = { serversViewModel.cancelPendingDelete() }
             )
         }
 

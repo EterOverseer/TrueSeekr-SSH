@@ -25,6 +25,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileOpen
@@ -75,6 +76,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.domain.AuthMethodType
 import com.example.domain.ProfileGroup
 import com.example.domain.TerminalThemePreset
+import com.example.profiles.PendingDeleteConfirmation
 import com.example.profiles.ProfileEditorDraft
 import com.example.ui.components.BannerTone
 import com.example.ui.components.ObsidianStatusBanner
@@ -91,10 +93,14 @@ fun ProfileEditorDialog(
     draft: ProfileEditorDraft,
     groups: List<ProfileGroup>,
     globalTailscaleEnabled: Boolean = false,
+    pendingDeleteConfirmation: PendingDeleteConfirmation? = null,
     onUpdate: ((ProfileEditorDraft) -> ProfileEditorDraft) -> Unit,
     onCancel: () -> Unit,
     onSaveProfile: () -> Unit,
-    onSaveAndConnect: () -> Unit
+    onSaveAndConnect: () -> Unit,
+    onDeleteProfile: (() -> Unit)? = null,
+    onConfirmPendingDelete: ((Boolean, Boolean) -> Unit)? = null,
+    onCancelPendingDelete: (() -> Unit)? = null
 ) {
     val colors = LocalObsidianColors.current
     val context = LocalContext.current
@@ -151,6 +157,18 @@ fun ProfileEditorDialog(
                         }
                     },
                     actions = {
+                        if (draft.existingId != null && onDeleteProfile != null) {
+                            IconButton(
+                                onClick = onDeleteProfile,
+                                modifier = Modifier.testTag("editor_delete_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "ลบโปรไฟล์",
+                                    tint = colors.red
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = { onUpdate { it.copy(isFavorite = !it.isFavorite) } },
                             modifier = Modifier.testTag("editor_favorite_toggle")
@@ -641,6 +659,35 @@ fun ProfileEditorDialog(
                         }
                     }
                 }
+
+                if (draft.existingId != null && onDeleteProfile != null) {
+                    OutlinedButton(
+                        onClick = onDeleteProfile,
+                        border = BorderStroke(1.dp, colors.red.copy(alpha = 0.55f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.red),
+                        shape = RoundedCornerShape(ObsidianRadius.md),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("editor_delete_bottom_button")
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("ลบโปรไฟล์นี้", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+
+            if (pendingDeleteConfirmation != null &&
+                pendingDeleteConfirmation.fromEditor &&
+                onConfirmPendingDelete != null &&
+                onCancelPendingDelete != null
+            ) {
+                ProfileDeleteConfirmationDialog(
+                    pending = pendingDeleteConfirmation,
+                    onConfirmDelete = onConfirmPendingDelete,
+                    onCancel = onCancelPendingDelete
+                )
             }
         }
     }

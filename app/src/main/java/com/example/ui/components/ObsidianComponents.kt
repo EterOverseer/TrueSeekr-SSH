@@ -2,9 +2,11 @@ package com.example.ui.components
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +48,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -61,6 +64,7 @@ import com.example.ui.theme.rememberReducedMotion
 /**
  * Glass-inspired bordered card following the Obsidian Aurora Command Center visual language.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ObsidianSurfaceCard(
     modifier: Modifier = Modifier,
@@ -68,6 +72,7 @@ fun ObsidianSurfaceCard(
     elevated: Boolean = false,
     accentBorder: Color? = null,
     onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val colors = LocalObsidianColors.current
@@ -78,6 +83,19 @@ fun ObsidianSurfaceCard(
         Brush.verticalGradient(listOf(colors.surface, colors.surface))
     }
 
+    val interactionModifier = when {
+        onClick != null && onLongClick != null -> Modifier.combinedClickable(
+            onClick = onClick,
+            onLongClick = onLongClick
+        )
+        onClick != null -> Modifier.clickable(onClick = onClick)
+        onLongClick != null -> Modifier.combinedClickable(
+            onClick = {},
+            onLongClick = onLongClick
+        )
+        else -> Modifier
+    }
+
     Surface(
         color = Color.Transparent,
         shape = shape,
@@ -85,7 +103,7 @@ fun ObsidianSurfaceCard(
         modifier = modifier
             .clip(shape)
             .background(bgBrush, shape)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(interactionModifier)
     ) {
         Column(content = content)
     }
@@ -468,6 +486,7 @@ fun ObsidianStatusBanner(
     modifier: Modifier = Modifier,
     tone: BannerTone = BannerTone.INFO,
     actionLabel: String? = null,
+    actionTestTag: String? = null,
     onAction: (() -> Unit)? = null,
     onDismiss: (() -> Unit)? = null
 ) {
@@ -495,14 +514,17 @@ fun ObsidianStatusBanner(
                 modifier = Modifier.weight(1f)
             )
             if (actionLabel != null && onAction != null) {
-                TextButton(onClick = onAction) {
+                TextButton(
+                    onClick = onAction,
+                    modifier = if (actionTestTag != null) Modifier.testTag(actionTestTag) else Modifier
+                ) {
                     Text(actionLabel, color = accent, fontWeight = FontWeight.SemiBold)
                 }
             }
             if (onDismiss != null) {
                 IconButton(
                     onClick = onDismiss,
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(48.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,

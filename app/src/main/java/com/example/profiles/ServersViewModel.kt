@@ -68,6 +68,22 @@ data class ProfileEditorDraft(
     val validationError: String? = null
 )
 
+data class PendingDeleteConfirmation(
+    val profiles: List<SshProfile>,
+    val activeSessionsForTargets: List<ManagedSessionUiState>,
+    val fromEditor: Boolean = false
+) {
+    val isBulk: Boolean get() = profiles.size > 1
+    val hasActiveSessions: Boolean get() = activeSessionsForTargets.isNotEmpty()
+    val hasAnyStoredCredential: Boolean get() = profiles.any { !it.credentialRefId.isNullOrBlank() }
+}
+
+data class DeletedProfilesUndoState(
+    val nonSecretProfiles: List<SshProfile>,
+    val message: String,
+    val removedCredentialsCount: Int = 0
+)
+
 data class ServersUiState(
     val allProfiles: List<SshProfile> = emptyList(),
     val filteredProfiles: List<SshProfile> = emptyList(),
@@ -80,7 +96,12 @@ data class ServersUiState(
     val selectedGroup: String? = null,
     val sortOrder: ProfileSortOrder = ProfileSortOrder.NAME_ASC,
     val networkStatus: NetworkStatus = NetworkStatus(),
-    val messageBanner: String? = null
+    val messageBanner: String? = null,
+    val errorBanner: String? = null,
+    val isSelectionMode: Boolean = false,
+    val selectedProfileIds: Set<String> = emptySet(),
+    val pendingDelete: PendingDeleteConfirmation? = null,
+    val undoDeleteState: DeletedProfilesUndoState? = null
 )
 
 data class PendingImportReview(
@@ -101,6 +122,11 @@ class ServersViewModel(
     private val selectedGroup = MutableStateFlow<String?>(null)
     private val sortOrder = MutableStateFlow(ProfileSortOrder.NAME_ASC)
     private val messageBanner = MutableStateFlow<String?>(null)
+    private val errorBanner = MutableStateFlow<String?>(null)
+    private val isSelectionMode = MutableStateFlow(false)
+    private val selectedProfileIds = MutableStateFlow<Set<String>>(emptySet())
+    private val pendingDelete = MutableStateFlow<PendingDeleteConfirmation?>(null)
+    private val undoDeleteState = MutableStateFlow<DeletedProfilesUndoState?>(null)
 
     private val _editorDraft = MutableStateFlow<ProfileEditorDraft?>(null)
     val editorDraft: StateFlow<ProfileEditorDraft?> = _editorDraft.asStateFlow()
@@ -114,30 +140,50 @@ class ServersViewModel(
 
     private val knownHostsFlow = knownHostRepository?.allKnownHosts ?: flowOf(emptyList())
 
+    private val filterParamsFlow = combine(
+        searchQuery,
+        selectedGroup,
+        sortOrder,
+        networkMonitor.status,
+        messageBanner,
+        knownHostsFlow
+    ) { arr ->
+        @Suppress("UNCHECKED_CAST")
+        FilterParams(
+            query = arr[0] as String,
+            selectedGroup = arr[1] as String?,
+            sortOrder = arr[2] as ProfileSortOrder,
+            networkStatus = arr[3] as NetworkStatus,
+            messageBanner = arr[4] as String?,
+            knownHosts = arr[5] as List<KnownHost>
+        )
+    }
+
+    private val managementParamsFlow = combine(
+        errorBanner,
+        isSelectionMode,
+        selectedProfileIds,
+        pendingDelete,
+        undoDeleteState
+    ) { err, selectionMode, selectedIds, pending, undo ->
+        ManagementParams(
+            errorBanner = err,
+            isSelectionMode = selectionMode,
+            selectedProfileIds = selectedIds,
+            pendingDelete = pending,
+            undoDeleteState = undo
+        )
+    }
+
+    private val combinedUiMetaFlow = combine(filterParamsFlow, managementParamsFlow) { f, m -> f to m }
+
     val uiState: StateFlow<ServersUiState> = combine(
         profileRepository.allProfiles,
         profileRepository.allGroups,
         profileRepository.recentConnections,
         sshSessionManager.sessions,
-        combine(
-            searchQuery,
-            selectedGroup,
-            sortOrder,
-            networkMonitor.status,
-            messageBanner,
-            knownHostsFlow
-        ) { arr ->
-            @Suppress("UNCHECKED_CAST")
-            FilterParams(
-                query = arr[0] as String,
-                selectedGroup = arr[1] as String?,
-                sortOrder = arr[2] as ProfileSortOrder,
-                networkStatus = arr[3] as NetworkStatus,
-                messageBanner = arr[4] as String?,
-                knownHosts = arr[5] as List<KnownHost>
-            )
-        }
-    ) { profiles, groups, recent, sessions, params ->
+        combinedUiMetaFlow
+    ) { profiles, groups, recent, sessions, (params, mgmt) ->
         val query = params.query.trim()
         val filtered = profiles
             .filter { profile ->
@@ -156,11 +202,20 @@ class ServersViewModel(
                     ProfileSortOrder.NAME_ASC -> list.sortedWith(
                         compareByDescending<SshProfile> { it.isFavorite }.thenBy { it.name.lowercase() }
                     )
-                    ProfileSortOrder.LAST_CONNECTED_DESC -> list.sortedByDescending { it.lastConnectedAt ?: 0L }
+                    ProfileSortOrder.LAST_CONNECTED_DESC -> list.sortedWith(
+                        compareByDescending<SshProfile> { it.lastConnectedAt ?: 0L }
+                            .thenByDescending { it.updatedAt }
+                    )
+                    ProfileSortOrder.CREATED_DESC -> list.sortedWith(
+                        compareByDescending<SshProfile> { it.createdAt }.thenBy { it.name.lowercase() }
+                    )
                     ProfileSortOrder.HOST_ASC -> list.sortedWith(
                         compareBy<SshProfile> { it.host.lowercase() }.thenBy { it.port }
                     )
-                    ProfileSortOrder.MOST_USED_DESC -> list.sortedByDescending { it.connectionCount }
+                    ProfileSortOrder.MOST_USED_DESC -> list.sortedWith(
+                        compareByDescending<SshProfile> { it.connectionCount }
+                            .thenByDescending { it.lastConnectedAt ?: 0L }
+                    )
                 }
             }
 
@@ -172,6 +227,8 @@ class ServersViewModel(
         val trustedMap = params.knownHosts.associate { kh ->
             "${kh.host.trim().lowercase()}:${kh.port}" to kh.sha256Fingerprint
         }
+
+        val validSelectedIds = mgmt.selectedProfileIds.intersect(profileById.keys)
 
         ServersUiState(
             allProfiles = profiles,
@@ -185,7 +242,12 @@ class ServersViewModel(
             selectedGroup = params.selectedGroup,
             sortOrder = params.sortOrder,
             networkStatus = params.networkStatus,
-            messageBanner = params.messageBanner
+            messageBanner = params.messageBanner,
+            errorBanner = mgmt.errorBanner,
+            isSelectionMode = mgmt.isSelectionMode,
+            selectedProfileIds = validSelectedIds,
+            pendingDelete = mgmt.pendingDelete,
+            undoDeleteState = mgmt.undoDeleteState
         )
     }.stateIn(
         scope = viewModelScope,
@@ -202,6 +264,14 @@ class ServersViewModel(
         val knownHosts: List<KnownHost>
     )
 
+    private data class ManagementParams(
+        val errorBanner: String?,
+        val isSelectionMode: Boolean,
+        val selectedProfileIds: Set<String>,
+        val pendingDelete: PendingDeleteConfirmation?,
+        val undoDeleteState: DeletedProfilesUndoState?
+    )
+
     fun setSearchQuery(query: String) {
         searchQuery.value = query
     }
@@ -216,6 +286,10 @@ class ServersViewModel(
 
     fun clearBanner() {
         messageBanner.value = null
+    }
+
+    fun clearErrorBanner() {
+        errorBanner.value = null
     }
 
     fun openCreateEditor() {
@@ -394,11 +468,52 @@ class ServersViewModel(
         }
     }
 
-    fun duplicateProfile(profile: SshProfile) {
+    fun enterSelectionMode(initialProfileId: String? = null) {
+        isSelectionMode.value = true
+        if (!initialProfileId.isNullOrBlank()) {
+            selectedProfileIds.update { it + initialProfileId }
+        }
+    }
+
+    fun exitSelectionMode() {
+        isSelectionMode.value = false
+        selectedProfileIds.value = emptySet()
+    }
+
+    fun toggleProfileSelection(profileId: String) {
+        if (!isSelectionMode.value) {
+            isSelectionMode.value = true
+        }
+        selectedProfileIds.update { current ->
+            if (profileId in current) current - profileId else current + profileId
+        }
+    }
+
+    fun selectAllVisible() {
+        isSelectionMode.value = true
+        val visibleIds = uiState.value.filteredProfiles.map { it.id }.toSet()
+        selectedProfileIds.update { it + visibleIds }
+    }
+
+    fun deselectAll() {
+        selectedProfileIds.value = emptySet()
+    }
+
+    fun duplicateProfile(profile: SshProfile, includeCredential: Boolean = false) {
         viewModelScope.launch {
-            val copy = profileRepository.duplicateProfile(profile.id)
-            if (copy != null) {
-                messageBanner.value = "คัดลอกโปรไฟล์ \"${copy.name}\" แล้ว (ต้องกรอก Credential ใหม่เพื่อความปลอดภัย)"
+            runCatching {
+                profileRepository.duplicateProfile(profile.id, includeCredential = includeCredential)
+            }.onSuccess { copy ->
+                if (copy != null) {
+                    errorBanner.value = null
+                    messageBanner.value = if (includeCredential && copy.credentialRefId != null) {
+                        "คัดลอกโปรไฟล์ \"${copy.name}\" พร้อม Credential ที่เข้ารหัสแยกชุดใหม่แล้ว"
+                    } else {
+                        "คัดลอกโปรไฟล์ \"${copy.name}\" แล้ว (ไม่คัดลอก Credential เพื่อความปลอดภัย)"
+                    }
+                }
+            }.onFailure { t ->
+                errorBanner.value = "คัดลอกโปรไฟล์ไม่สำเร็จ: ${t.message ?: "Unknown error"}"
             }
         }
     }
@@ -415,20 +530,159 @@ class ServersViewModel(
         }
     }
 
-    fun deleteProfile(profile: SshProfile, removeAssociatedCredential: Boolean) {
+    fun requestDeleteProfile(profile: SshProfile, fromEditor: Boolean = false) {
+        val activeForTarget = sshSessionManager.getActiveSessionsForProfiles(setOf(profile.id))
+        pendingDelete.value = PendingDeleteConfirmation(
+            profiles = listOf(profile),
+            activeSessionsForTargets = activeForTarget,
+            fromEditor = fromEditor
+        )
+    }
+
+    fun requestDeleteEditingProfile() {
+        val editingId = _editorDraft.value?.existingId ?: return
         viewModelScope.launch {
-            profileRepository.deleteProfile(profile.id, removeAssociatedCredential)
-            messageBanner.value = if (removeAssociatedCredential) {
-                "ลบโปรไฟล์ \"${profile.name}\" และ Credential ที่ผูกไว้แล้ว (Host Trust ยังคงอยู่)"
-            } else {
-                "ลบโปรไฟล์ \"${profile.name}\" แล้ว (เก็บ Credential และ Host Trust ไว้)"
+            val target = uiState.value.allProfiles.firstOrNull { it.id == editingId }
+                ?: profileRepository.getProfileById(editingId)
+                ?: return@launch
+            requestDeleteProfile(target, fromEditor = true)
+        }
+    }
+
+    fun requestBulkDelete() {
+        val selectedIds = uiState.value.selectedProfileIds
+        if (selectedIds.isEmpty()) return
+        val targets = uiState.value.allProfiles.filter { it.id in selectedIds }
+        if (targets.isEmpty()) return
+        val activeForTargets = sshSessionManager.getActiveSessionsForProfiles(targets.map { it.id }.toSet())
+        pendingDelete.value = PendingDeleteConfirmation(
+            profiles = targets,
+            activeSessionsForTargets = activeForTargets,
+            fromEditor = false
+        )
+    }
+
+    fun cancelPendingDelete() {
+        pendingDelete.value = null
+    }
+
+    fun confirmPendingDelete(
+        removeAssociatedCredentials: Boolean,
+        disconnectActiveFirst: Boolean
+    ) {
+        val pending = pendingDelete.value ?: return
+        val liveSessions = sshSessionManager.getActiveSessionsForProfiles(pending.profiles.map { it.id }.toSet())
+        if (liveSessions.isNotEmpty() && !disconnectActiveFirst) {
+            pendingDelete.value = pending.copy(activeSessionsForTargets = liveSessions)
+            errorBanner.value = "พบเซสชัน SSH ที่กำลังเชื่อมต่ออยู่ กรุณาเลือก 'ตัดการเชื่อมต่อและลบ' หรือ 'ยกเลิก'"
+            return
+        }
+
+        viewModelScope.launch {
+            val targetIds = pending.profiles.map { it.id }
+            val targetIdSet = targetIds.toSet()
+            try {
+                if (liveSessions.isNotEmpty() && disconnectActiveFirst) {
+                    sshSessionManager.disconnectAndCloseTabsForProfiles(targetIdSet)
+                }
+
+                val deleteResult = profileRepository.deleteProfiles(
+                    ids = targetIds,
+                    removeAssociatedCredentials = removeAssociatedCredentials
+                )
+                sshSessionManager.closeNonLiveTabsForProfiles(targetIdSet)
+
+                pendingDelete.value = null
+                if (pending.fromEditor) {
+                    _editorDraft.value = null
+                }
+                if (isSelectionMode.value) {
+                    selectedProfileIds.update { it - targetIdSet }
+                    if (selectedProfileIds.value.isEmpty()) {
+                        isSelectionMode.value = false
+                    }
+                }
+                errorBanner.value = null
+                messageBanner.value = null
+
+                val deletedCount = deleteResult.deletedProfilesSanitized.size
+                val undoMsg = if (deletedCount == 1) {
+                    val singleName = deleteResult.deletedProfilesSanitized.first().name
+                    if (removeAssociatedCredentials && deleteResult.deletedCredentialCount > 0) {
+                        "ลบโปรไฟล์ \"$singleName\" และ Credential ใน Vault แล้ว (กู้คืนได้เฉพาะค่าโปรไฟล์)"
+                    } else {
+                        "ลบโปรไฟล์ \"$singleName\" แล้ว (กู้คืนเฉพาะค่าโปรไฟล์ได้)"
+                    }
+                } else {
+                    "ลบโปรไฟล์ $deletedCount รายการแล้ว (กู้คืนเฉพาะค่าโปรไฟล์ได้ ไม่รวมรหัสผ่าน/Key)"
+                }
+
+                undoDeleteState.value = DeletedProfilesUndoState(
+                    nonSecretProfiles = deleteResult.deletedProfilesSanitized.map { it.copy(credentialRefId = null) },
+                    message = undoMsg,
+                    removedCredentialsCount = deleteResult.deletedCredentialCount
+                )
+            } catch (t: Throwable) {
+                pendingDelete.value = null
+                errorBanner.value = "ลบโปรไฟล์ไม่สำเร็จ (ฐานข้อมูลยังคงสมบูรณ์): ${t.message ?: "Unknown error"}"
+            }
+        }
+    }
+
+    fun undoLastDelete() {
+        val state = undoDeleteState.value ?: return
+        viewModelScope.launch {
+            try {
+                val restoredCount = profileRepository.restoreNonSecretProfilesFromUndo(state.nonSecretProfiles)
+                undoDeleteState.value = null
+                errorBanner.value = null
+                messageBanner.value = "กู้คืนการตั้งค่าโปรไฟล์ $restoredCount รายการแล้ว (ต้องกรอกรหัสผ่าน/Key ใหม่เพื่อความปลอดภัย)"
+            } catch (t: Throwable) {
+                errorBanner.value = "กู้คืนโปรไฟล์ไม่สำเร็จ: ${t.message ?: "Unknown error"}"
+            }
+        }
+    }
+
+    fun dismissUndo() {
+        undoDeleteState.value = null
+    }
+
+    fun deleteProfile(profile: SshProfile, removeAssociatedCredential: Boolean) {
+        val activeSessions = sshSessionManager.getActiveSessionsForProfiles(setOf(profile.id))
+        if (activeSessions.isNotEmpty()) {
+            requestDeleteProfile(profile)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val result = profileRepository.deleteProfiles(listOf(profile.id), removeAssociatedCredential)
+                sshSessionManager.closeNonLiveTabsForProfiles(setOf(profile.id))
+                errorBanner.value = null
+                val msg = if (removeAssociatedCredential) {
+                    "ลบโปรไฟล์ \"${profile.name}\" และ Credential ที่ผูกไว้แล้ว (Host Trust ยังคงอยู่)"
+                } else {
+                    "ลบโปรไฟล์ \"${profile.name}\" แล้ว (เก็บ Credential และ Host Trust ไว้)"
+                }
+                undoDeleteState.value = DeletedProfilesUndoState(
+                    nonSecretProfiles = result.deletedProfilesSanitized.map { it.copy(credentialRefId = null) },
+                    message = msg,
+                    removedCredentialsCount = result.deletedCredentialCount
+                )
+            } catch (t: Throwable) {
+                errorBanner.value = "ลบโปรไฟล์ไม่สำเร็จ: ${t.message ?: "Unknown error"}"
             }
         }
     }
 
     fun removeStoredCredentialOnly(profile: SshProfile) {
         viewModelScope.launch {
-            profile.credentialRefId?.let { credentialVault.deleteCredential(it) }
+            val refId = profile.credentialRefId
+            if (refId != null) {
+                val otherUses = uiState.value.allProfiles.any { it.id != profile.id && it.credentialRefId == refId }
+                if (!otherUses) {
+                    credentialVault.deleteCredential(refId)
+                }
+            }
             profileRepository.saveProfile(profile.copy(credentialRefId = null))
             messageBanner.value = "ลบ Credential ของ \"${profile.name}\" ออกจาก Vault แล้ว"
         }
@@ -465,13 +719,17 @@ class ServersViewModel(
         }
     }
 
-    fun getExportPreview(): ExportBackupPreview {
-        return BackupCryptoManager.buildExportPreview(uiState.value.allProfiles, credentialVault)
+    fun getExportPreview(profileIds: Set<String>? = null): ExportBackupPreview {
+        val targetProfiles = resolveExportProfiles(profileIds)
+        return BackupCryptoManager.buildExportPreview(targetProfiles, credentialVault)
     }
 
-    fun buildExportContent(encryptWithPassphrase: String?): Result<String> {
-        val profiles = uiState.value.allProfiles
-        val groups = uiState.value.groups.filter { !it.isBuiltIn }.map { it.name }
+    fun buildExportContent(encryptWithPassphrase: String?, profileIds: Set<String>? = null): Result<String> {
+        val profiles = resolveExportProfiles(profileIds)
+        val usedGroupNames = profiles.map { it.groupName }.toSet()
+        val groups = uiState.value.groups
+            .filter { !it.isBuiltIn && (profileIds == null || it.name in usedGroupNames) }
+            .map { it.name }
         return runCatching {
             if (encryptWithPassphrase.isNullOrBlank()) {
                 BackupCryptoManager.exportMetadataJson(profiles, groups)
@@ -486,9 +744,16 @@ class ServersViewModel(
         }
     }
 
-    fun buildEncryptedFullBackup(passphrase: String, includeCredentials: Boolean): Result<String> {
-        val profiles = uiState.value.allProfiles
-        val groups = uiState.value.groups.filter { !it.isBuiltIn }.map { it.name }
+    fun buildEncryptedFullBackup(
+        passphrase: String,
+        includeCredentials: Boolean,
+        profileIds: Set<String>? = null
+    ): Result<String> {
+        val profiles = resolveExportProfiles(profileIds)
+        val usedGroupNames = profiles.map { it.groupName }.toSet()
+        val groups = uiState.value.groups
+            .filter { !it.isBuiltIn && (profileIds == null || it.name in usedGroupNames) }
+            .map { it.name }
         val passChars = passphrase.toCharArray()
         return try {
             runCatching {
@@ -503,6 +768,11 @@ class ServersViewModel(
         } finally {
             passChars.fill('\u0000')
         }
+    }
+
+    private fun resolveExportProfiles(profileIds: Set<String>?): List<SshProfile> {
+        val all = uiState.value.allProfiles
+        return if (profileIds == null) all else all.filter { it.id in profileIds }
     }
 
     fun prepareImportPreview(rawText: String, passphrase: String?): BackupImportResult {

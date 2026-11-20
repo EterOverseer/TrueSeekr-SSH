@@ -19,12 +19,18 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
 
+data class DeletedProfilesResult(
+    val deletedProfilesSanitized: List<SshProfile>,
+    val deletedCredentialCount: Int
+)
+
 class ProfileRepository(
     private val profileDao: ProfileDao,
     private val groupDao: ProfileGroupDao,
     private val recentDao: RecentConnectionDao,
     private val credentialVault: CredentialVault,
-    private val database: PocketSshDatabase? = null
+    private val database: PocketSshDatabase? = null,
+    private val tmuxSessionDao: TmuxSessionDao? = null
 ) {
     val allProfiles: Flow<List<SshProfile>> =
         profileDao.observeAllProfiles().map { list -> list.map { it.toDomain() } }
@@ -94,20 +100,54 @@ class ProfileRepository(
         return persisted
     }
 
-    suspend fun duplicateProfile(sourceId: String): SshProfile? {
+    suspend fun duplicateProfile(
+        sourceId: String,
+        includeCredential: Boolean = false
+    ): SshProfile? {
         val original = getProfileById(sourceId) ?: return null
         val now = System.currentTimeMillis()
+        var newId = UUID.randomUUID().toString()
+        while (profileDao.getProfileById(newId) != null) {
+            newId = UUID.randomUUID().toString()
+        }
+
+        var duplicatedCredRef: String? = null
+        if (includeCredential && !original.credentialRefId.isNullOrBlank()) {
+            val existingSummary = credentialVault.getSummary(original.credentialRefId)
+            val secretMaterial = credentialVault.readSecretString(original.credentialRefId)
+            if (!secretMaterial.isNullOrBlank() && existingSummary != null) {
+                duplicatedCredRef = when (existingSummary.kind) {
+                    StoredCredentialKind.PASSWORD -> {
+                        val chars = secretMaterial.toCharArray()
+                        try {
+                            credentialVault.savePassword(null, chars)
+                        } finally {
+                            chars.fill('\u0000')
+                        }
+                    }
+                    StoredCredentialKind.PRIVATE_KEY -> {
+                        credentialVault.savePrivateKey(null, secretMaterial)
+                    }
+                }
+            }
+        }
+
         val copy = original.copy(
-            id = UUID.randomUUID().toString(),
+            id = newId,
             name = "${original.name} (Copy)",
-            credentialRefId = null, // Do not share mutable vault refs silently
+            credentialRefId = duplicatedCredRef,
             createdAt = now,
             updatedAt = now,
             lastConnectedAt = null,
             connectionCount = 0
         )
-        profileDao.upsertProfile(SshProfileEntity.fromDomain(copy))
-        return copy
+        return try {
+            profileDao.upsertProfile(SshProfileEntity.fromDomain(copy))
+            copy
+        } catch (t: Throwable) {
+            duplicatedCredRef?.let { ref -> runCatching { credentialVault.deleteCredential(ref) } }
+            throw t
+        }
     }
 
     suspend fun toggleFavorite(id: String, isFavorite: Boolean) {
@@ -127,15 +167,97 @@ class ProfileRepository(
     }
 
     /**
-     * Deletes the profile. Optionally deletes the associated credential from CredentialVault.
-     * Deliberately leaves KnownHost trust entries untouched.
+     * Deletes a single profile safely. Optionally deletes its associated credential from CredentialVault.
+     * Deliberately leaves KnownHost trust entries, external user files, and remote tmux sessions untouched.
      */
     suspend fun deleteProfile(id: String, removeAssociatedCredential: Boolean) {
-        val existing = getProfileById(id)
-        profileDao.deleteProfileById(id)
-        if (removeAssociatedCredential && existing?.credentialRefId != null) {
-            credentialVault.deleteCredential(existing.credentialRefId)
+        deleteProfiles(listOf(id), removeAssociatedCredential)
+    }
+
+    /**
+     * Atomically deletes one or more profiles from Room (plus local non-secret recent & tmux metadata),
+     * and only after transaction commit removes unreferenced app-managed credentials from CredentialVault.
+     * Returns non-secret sanitized snapshots suitable for Undo without retaining secrets or vault refs.
+     */
+    suspend fun deleteProfiles(
+        ids: List<String>,
+        removeAssociatedCredentials: Boolean
+    ): DeletedProfilesResult {
+        val uniqueIds = ids.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (uniqueIds.isEmpty()) {
+            return DeletedProfilesResult(emptyList(), 0)
         }
+
+        val targets = uniqueIds.mapNotNull { getProfileById(it) }
+        if (targets.isEmpty()) {
+            return DeletedProfilesResult(emptyList(), 0)
+        }
+
+        val targetIds = targets.map { it.id }
+        val candidateCredRefs = targets.mapNotNull { it.credentialRefId?.takeIf(String::isNotBlank) }.distinct()
+        val effectiveTmuxDao = tmuxSessionDao ?: database?.tmuxSessionDao()
+
+        val dbDeleteBlock: suspend () -> Unit = {
+            targetIds.chunked(500).forEach { chunk ->
+                recentDao.deleteForProfiles(chunk)
+                effectiveTmuxDao?.deleteForProfiles(chunk)
+                profileDao.deleteProfilesByIds(chunk)
+            }
+        }
+
+        if (database != null) {
+            database.withTransaction { dbDeleteBlock() }
+        } else {
+            dbDeleteBlock()
+        }
+
+        var deletedCreds = 0
+        candidateCredRefs.forEach { refId ->
+            val stillReferenced = profileDao.countProfilesUsingCredentialRef(refId) > 0
+            if (!stillReferenced) {
+                credentialVault.clearEphemeralPassphrase(refId)
+                if (removeAssociatedCredentials && credentialVault.hasCredential(refId)) {
+                    credentialVault.deleteCredential(refId)
+                    deletedCreds++
+                }
+            }
+        }
+
+        val sanitizedSnapshots = targets.map { profile ->
+            profile.copy(credentialRefId = null)
+        }
+        return DeletedProfilesResult(
+            deletedProfilesSanitized = sanitizedSnapshots,
+            deletedCredentialCount = deletedCreds
+        )
+    }
+
+    /**
+     * Restores non-secret profile metadata from Undo. Always enforces credentialRefId = null
+     * so deleted passwords or private keys are never retained or revived via Undo.
+     */
+    suspend fun restoreNonSecretProfilesFromUndo(snapshots: List<SshProfile>): Int {
+        if (snapshots.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        var restored = 0
+        val dbRestoreBlock: suspend () -> Unit = {
+            ensureBuiltInGroups()
+            snapshots.forEach { snap ->
+                val sanitized = snap.copy(
+                    credentialRefId = null,
+                    updatedAt = now
+                )
+                ensureGroupExists(sanitized.groupName)
+                profileDao.upsertProfile(SshProfileEntity.fromDomain(sanitized))
+                restored++
+            }
+        }
+        if (database != null) {
+            database.withTransaction { dbRestoreBlock() }
+        } else {
+            dbRestoreBlock()
+        }
+        return restored
     }
 
     /**

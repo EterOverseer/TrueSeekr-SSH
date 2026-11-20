@@ -81,6 +81,7 @@ enum class TerminalCursorStyle(val label: String) {
 enum class ProfileSortOrder(val label: String) {
     NAME_ASC("ชื่อ (A-Z)"),
     LAST_CONNECTED_DESC("เชื่อมต่อล่าสุด"),
+    CREATED_DESC("วันที่สร้างล่าสุด"),
     HOST_ASC("Host / IP"),
     MOST_USED_DESC("ใช้งานบ่อย")
 }

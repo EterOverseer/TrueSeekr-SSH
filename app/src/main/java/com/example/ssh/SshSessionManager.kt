@@ -362,6 +362,60 @@ class SshSessionManager(
         }
     }
 
+    fun isStatusActiveOrPending(status: SessionStatus): Boolean {
+        return status.isLiveConnected ||
+            status == SessionStatus.CONNECTING ||
+            status == SessionStatus.VERIFYING_HOST ||
+            status == SessionStatus.AUTHENTICATING ||
+            status == SessionStatus.RECONNECTING
+    }
+
+    fun getActiveSessionsForProfiles(profileIds: Set<String>): List<ManagedSessionUiState> {
+        if (profileIds.isEmpty()) return emptyList()
+        return _sessions.value.filter { it.profile.id in profileIds && isStatusActiveOrPending(it.status) }
+    }
+
+    suspend fun disconnectAndCloseTabsForProfiles(profileIds: Set<String>) {
+        if (profileIds.isEmpty()) return
+        val matchingSessionIds = _sessions.value
+            .filter { it.profile.id in profileIds }
+            .map { it.sessionId }
+            .toSet()
+        if (matchingSessionIds.isEmpty()) return
+
+        val removedRuntimes = matchingSessionIds.mapNotNull { id -> runtimes.remove(id) }
+        _sessions.update { list -> list.filterNot { it.sessionId in matchingSessionIds } }
+        if (_activeSessionId.value in matchingSessionIds) {
+            _activeSessionId.value = _sessions.value.firstOrNull()?.sessionId
+        }
+        withContext(Dispatchers.IO) {
+            removedRuntimes.forEach { runtime ->
+                closeTransportOnly(runtime)
+                runtime.healthCache = ServerHealthSessionCache()
+                tailscaleCoordinator?.onSessionEnded(runtime.sessionId)
+            }
+        }
+    }
+
+    fun closeNonLiveTabsForProfiles(profileIds: Set<String>) {
+        if (profileIds.isEmpty()) return
+        val removableIds = _sessions.value
+            .filter { it.profile.id in profileIds && !isStatusActiveOrPending(it.status) }
+            .map { it.sessionId }
+            .toSet()
+        if (removableIds.isEmpty()) return
+        removableIds.forEach { runtimes.remove(it) }
+        _sessions.update { list -> list.filterNot { it.sessionId in removableIds } }
+        if (_activeSessionId.value in removableIds) {
+            _activeSessionId.value = _sessions.value.firstOrNull()?.sessionId
+        }
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun registerTestSessionStateForTests(state: ManagedSessionUiState) {
+        _sessions.update { list -> list.filterNot { it.sessionId == state.sessionId } + state }
+    }
+
     fun disconnectAllSessions() {
         val snapshotRuntimes = runtimes.values.toList()
         scope.launch {

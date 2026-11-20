@@ -45,6 +45,12 @@ interface ProfileDao {
 
     @Query("DELETE FROM ssh_profiles WHERE id = :id")
     suspend fun deleteProfileById(id: String)
+
+    @Query("DELETE FROM ssh_profiles WHERE id IN (:ids)")
+    suspend fun deleteProfilesByIds(ids: List<String>)
+
+    @Query("SELECT COUNT(*) FROM ssh_profiles WHERE credentialRefId = :refId")
+    suspend fun countProfilesUsingCredentialRef(refId: String): Int
 }
 
 @Dao
@@ -83,6 +89,9 @@ interface RecentConnectionDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: RecentConnectionEntity)
+
+    @Query("DELETE FROM recent_connections WHERE profileId IN (:profileIds)")
+    suspend fun deleteForProfiles(profileIds: List<String>)
 
     @Query("DELETE FROM recent_connections")
     suspend fun clearAll()
@@ -149,4 +158,7 @@ interface TmuxSessionDao {
 
     @Query("DELETE FROM tmux_sessions WHERE profileId = :profileId")
     suspend fun deleteForProfile(profileId: String)
+
+    @Query("DELETE FROM tmux_sessions WHERE profileId IN (:profileIds)")
+    suspend fun deleteForProfiles(profileIds: List<String>)
 }
