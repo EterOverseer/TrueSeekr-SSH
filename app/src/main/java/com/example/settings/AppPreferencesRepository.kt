@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.domain.AppAccentPreset
 import com.example.domain.AppThemeMode
+import com.example.domain.HealthRefreshInterval
 import com.example.domain.TerminalCursorStyle
 import com.example.domain.TerminalFontFamily
 import com.example.domain.TerminalThemePreset
@@ -49,7 +50,16 @@ data class AppSettings(
     val autoReconnectPrompt: Boolean = true,
     val tailscaleAutomationEnabled: Boolean = false,
     val tailscaleAutoDisconnect: Boolean = true,
-    val tailscaleConnectTimeoutSec: Int = 30
+    val tailscaleConnectTimeoutSec: Int = 30,
+    val healthDashboardEnabled: Boolean = true,
+    val healthRefreshInterval: HealthRefreshInterval = HealthRefreshInterval.FIVE_SECONDS,
+    val sshKeepAliveEnabled: Boolean = true,
+    val sshKeepAliveIntervalSec: Int = 30,
+    val sshKeepAliveMaxMissed: Int = 3,
+    val backgroundKeepAliveEnabled: Boolean = false,
+    val keepCpuAwakeWhileConnected: Boolean = false,
+    val tmuxIntegrationEnabled: Boolean = true,
+    val tmuxSessionPrefix: String = "trueSeekr"
 )
 
 class AppPreferencesRepository(
@@ -82,6 +92,15 @@ class AppPreferencesRepository(
         val TAILSCALE_AUTOMATION_ENABLED = booleanPreferencesKey("tailscale_automation_enabled")
         val TAILSCALE_AUTO_DISCONNECT = booleanPreferencesKey("tailscale_auto_disconnect")
         val TAILSCALE_CONNECT_TIMEOUT_SEC = intPreferencesKey("tailscale_connect_timeout_sec")
+        val HEALTH_DASHBOARD_ENABLED = booleanPreferencesKey("health_dashboard_enabled")
+        val HEALTH_REFRESH_INTERVAL_SEC = intPreferencesKey("health_refresh_interval_sec")
+        val SSH_KEEPALIVE_ENABLED = booleanPreferencesKey("ssh_keepalive_enabled")
+        val SSH_KEEPALIVE_INTERVAL_SEC = intPreferencesKey("ssh_keepalive_interval_sec")
+        val SSH_KEEPALIVE_MAX_MISSED = intPreferencesKey("ssh_keepalive_max_missed")
+        val BACKGROUND_KEEPALIVE_ENABLED = booleanPreferencesKey("background_keepalive_enabled")
+        val KEEP_CPU_AWAKE = booleanPreferencesKey("keep_cpu_awake_while_connected")
+        val TMUX_INTEGRATION_ENABLED = booleanPreferencesKey("tmux_integration_enabled")
+        val TMUX_SESSION_PREFIX = stringPreferencesKey("tmux_session_prefix")
     }
 
     val settings: Flow<AppSettings> = dataStore.data.map { prefs ->
@@ -92,6 +111,10 @@ class AppPreferencesRepository(
         val accentName = prefs[Keys.ACCENT_PRESET] ?: AppAccentPreset.CYAN.name
         val fontFamilyName = prefs[Keys.TERM_FONT_FAMILY] ?: TerminalFontFamily.JETBRAINS_MONO.name
         val cursorName = prefs[Keys.CURSOR_STYLE] ?: TerminalCursorStyle.BLOCK.name
+        val healthSec = prefs[Keys.HEALTH_REFRESH_INTERVAL_SEC] ?: HealthRefreshInterval.FIVE_SECONDS.seconds
+        val rawKeepAliveInterval = prefs[Keys.SSH_KEEPALIVE_INTERVAL_SEC]
+            ?: prefs[Keys.KEEPALIVE_SEC]
+            ?: 30
 
         AppSettings(
             appLockEnabled = prefs[Keys.APP_LOCK_ENABLED] ?: false,
@@ -120,7 +143,17 @@ class AppPreferencesRepository(
             autoReconnectPrompt = prefs[Keys.AUTO_RECONNECT_PROMPT] ?: true,
             tailscaleAutomationEnabled = prefs[Keys.TAILSCALE_AUTOMATION_ENABLED] ?: false,
             tailscaleAutoDisconnect = prefs[Keys.TAILSCALE_AUTO_DISCONNECT] ?: true,
-            tailscaleConnectTimeoutSec = (prefs[Keys.TAILSCALE_CONNECT_TIMEOUT_SEC] ?: 30).coerceIn(10, 120)
+            tailscaleConnectTimeoutSec = (prefs[Keys.TAILSCALE_CONNECT_TIMEOUT_SEC] ?: 30).coerceIn(10, 120),
+            healthDashboardEnabled = prefs[Keys.HEALTH_DASHBOARD_ENABLED] ?: true,
+            healthRefreshInterval = HealthRefreshInterval.entries.firstOrNull { it.seconds == healthSec }
+                ?: HealthRefreshInterval.FIVE_SECONDS,
+            sshKeepAliveEnabled = prefs[Keys.SSH_KEEPALIVE_ENABLED] ?: true,
+            sshKeepAliveIntervalSec = rawKeepAliveInterval.coerceIn(5, 300),
+            sshKeepAliveMaxMissed = (prefs[Keys.SSH_KEEPALIVE_MAX_MISSED] ?: 3).coerceIn(1, 10),
+            backgroundKeepAliveEnabled = prefs[Keys.BACKGROUND_KEEPALIVE_ENABLED] ?: false,
+            keepCpuAwakeWhileConnected = prefs[Keys.KEEP_CPU_AWAKE] ?: false,
+            tmuxIntegrationEnabled = prefs[Keys.TMUX_INTEGRATION_ENABLED] ?: true,
+            tmuxSessionPrefix = (prefs[Keys.TMUX_SESSION_PREFIX] ?: "trueSeekr").ifBlank { "trueSeekr" }
         )
     }
 
@@ -183,7 +216,13 @@ class AppPreferencesRepository(
     }
 
     suspend fun setDefaultKeepAliveSec(seconds: Int) {
-        dataStore.edit { it[Keys.KEEPALIVE_SEC] = seconds.coerceIn(0, 300) }
+        dataStore.edit {
+            val clamped = seconds.coerceIn(0, 300)
+            it[Keys.KEEPALIVE_SEC] = clamped
+            if (clamped > 0) {
+                it[Keys.SSH_KEEPALIVE_INTERVAL_SEC] = clamped.coerceIn(5, 300)
+            }
+        }
     }
 
     suspend fun setThemeMode(mode: AppThemeMode) {
@@ -232,5 +271,51 @@ class AppPreferencesRepository(
 
     suspend fun setTailscaleConnectTimeoutSec(seconds: Int) {
         dataStore.edit { it[Keys.TAILSCALE_CONNECT_TIMEOUT_SEC] = seconds.coerceIn(10, 120) }
+    }
+
+    suspend fun setHealthDashboardEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.HEALTH_DASHBOARD_ENABLED] = enabled }
+    }
+
+    suspend fun setHealthRefreshInterval(interval: HealthRefreshInterval) {
+        dataStore.edit { it[Keys.HEALTH_REFRESH_INTERVAL_SEC] = interval.seconds }
+    }
+
+    suspend fun setSshKeepAliveEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.SSH_KEEPALIVE_ENABLED] = enabled }
+    }
+
+    suspend fun setSshKeepAliveIntervalSec(seconds: Int) {
+        val clamped = seconds.coerceIn(5, 300)
+        dataStore.edit {
+            it[Keys.SSH_KEEPALIVE_INTERVAL_SEC] = clamped
+            it[Keys.KEEPALIVE_SEC] = clamped
+        }
+    }
+
+    suspend fun setSshKeepAliveMaxMissed(maxMissed: Int) {
+        dataStore.edit { it[Keys.SSH_KEEPALIVE_MAX_MISSED] = maxMissed.coerceIn(1, 10) }
+    }
+
+    suspend fun setBackgroundKeepAliveEnabled(enabled: Boolean) {
+        dataStore.edit {
+            it[Keys.BACKGROUND_KEEPALIVE_ENABLED] = enabled
+            if (!enabled) {
+                it[Keys.KEEP_CPU_AWAKE] = false
+            }
+        }
+    }
+
+    suspend fun setKeepCpuAwakeWhileConnected(enabled: Boolean) {
+        dataStore.edit { it[Keys.KEEP_CPU_AWAKE] = enabled }
+    }
+
+    suspend fun setTmuxIntegrationEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.TMUX_INTEGRATION_ENABLED] = enabled }
+    }
+
+    suspend fun setTmuxSessionPrefix(prefix: String) {
+        val sanitized = prefix.replace(Regex("[^A-Za-z0-9_-]"), "").take(20).ifBlank { "trueSeekr" }
+        dataStore.edit { it[Keys.TMUX_SESSION_PREFIX] = sanitized }
     }
 }

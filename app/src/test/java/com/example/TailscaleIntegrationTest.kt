@@ -575,7 +575,7 @@ class TailscaleIntegrationTest {
         rawDb.close()
 
         val migratedRoomDb = Room.databaseBuilder(context, PocketSshDatabase::class.java, dbFile.absolutePath)
-            .addMigrations(PocketSshDatabase.MIGRATION_1_2)
+            .addMigrations(*PocketSshDatabase.ALL_MIGRATIONS)
             .allowMainThreadQueries()
             .build()
 

@@ -126,3 +126,27 @@ interface CommandSnippetDao {
     @Query("DELETE FROM command_snippets WHERE id = :id")
     suspend fun deleteById(id: String)
 }
+
+@Dao
+interface TmuxSessionDao {
+    @Query("SELECT * FROM tmux_sessions WHERE profileId = :profileId ORDER BY lastAttachedAt DESC")
+    fun observeForProfile(profileId: String): Flow<List<TmuxSessionEntity>>
+
+    @Query("SELECT * FROM tmux_sessions ORDER BY lastAttachedAt DESC")
+    suspend fun getAllOnce(): List<TmuxSessionEntity>
+
+    @Query("SELECT * FROM tmux_sessions WHERE profileId = :profileId ORDER BY lastAttachedAt DESC")
+    suspend fun getForProfileOnce(profileId: String): List<TmuxSessionEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: TmuxSessionEntity)
+
+    @Query("UPDATE tmux_sessions SET lastAttachedAt = :timestamp WHERE sessionName = :sessionName")
+    suspend fun touchAttached(sessionName: String, timestamp: Long)
+
+    @Query("DELETE FROM tmux_sessions WHERE sessionName = :sessionName")
+    suspend fun deleteByName(sessionName: String)
+
+    @Query("DELETE FROM tmux_sessions WHERE profileId = :profileId")
+    suspend fun deleteForProfile(profileId: String)
+}

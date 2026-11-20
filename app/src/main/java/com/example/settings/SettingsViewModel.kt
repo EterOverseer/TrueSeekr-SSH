@@ -7,6 +7,7 @@ import com.example.data.KnownHostRepository
 import com.example.data.ProfileRepository
 import com.example.domain.AppAccentPreset
 import com.example.domain.AppThemeMode
+import com.example.domain.HealthRefreshInterval
 import com.example.domain.KnownHost
 import com.example.domain.TerminalCursorStyle
 import com.example.domain.TerminalFontFamily
@@ -184,6 +185,64 @@ class SettingsViewModel(
         viewModelScope.launch {
             preferencesRepository.setTailscaleConnectTimeoutSec(seconds)
         }
+    }
+
+    fun setHealthDashboardEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setHealthDashboardEnabled(enabled)
+        }
+    }
+
+    fun setHealthRefreshInterval(interval: HealthRefreshInterval) {
+        viewModelScope.launch {
+            preferencesRepository.setHealthRefreshInterval(interval)
+        }
+    }
+
+    fun setSshKeepAliveEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setSshKeepAliveEnabled(enabled)
+        }
+    }
+
+    fun setSshKeepAliveIntervalSec(seconds: Int) {
+        viewModelScope.launch {
+            preferencesRepository.setSshKeepAliveIntervalSec(seconds)
+        }
+    }
+
+    fun setSshKeepAliveMaxMissed(maxMissed: Int) {
+        viewModelScope.launch {
+            preferencesRepository.setSshKeepAliveMaxMissed(maxMissed)
+        }
+    }
+
+    fun setBackgroundKeepAliveEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setBackgroundKeepAliveEnabled(enabled)
+        }
+    }
+
+    fun setKeepCpuAwakeWhileConnected(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setKeepCpuAwakeWhileConnected(enabled)
+        }
+    }
+
+    fun setTmuxIntegrationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setTmuxIntegrationEnabled(enabled)
+        }
+    }
+
+    fun setTmuxSessionPrefix(prefix: String) {
+        viewModelScope.launch {
+            preferencesRepository.setTmuxSessionPrefix(prefix)
+        }
+    }
+
+    fun postFeedback(message: String) {
+        _feedbackMessage.value = message
     }
 
     fun refreshTailscaleDiagnostics() {

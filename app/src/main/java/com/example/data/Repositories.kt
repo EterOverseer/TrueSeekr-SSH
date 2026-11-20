@@ -1,13 +1,20 @@
 package com.example.data
 
+import androidx.room.withTransaction
 import com.example.core.HostFingerprintUtils
 import com.example.domain.AuthMethodType
 import com.example.domain.CommandSnippet
 import com.example.domain.KnownHost
+import com.example.domain.ManagedTmuxSession
 import com.example.domain.ProfileGroup
 import com.example.domain.RecentConnection
 import com.example.domain.SshProfile
+import com.example.security.BackupCryptoManager
 import com.example.security.CredentialVault
+import com.example.security.ImportDuplicateStrategy
+import com.example.security.ImportExecutionSummary
+import com.example.security.ProfileBackupBundle
+import com.example.security.StoredCredentialKind
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
@@ -16,7 +23,8 @@ class ProfileRepository(
     private val profileDao: ProfileDao,
     private val groupDao: ProfileGroupDao,
     private val recentDao: RecentConnectionDao,
-    private val credentialVault: CredentialVault
+    private val credentialVault: CredentialVault,
+    private val database: PocketSshDatabase? = null
 ) {
     val allProfiles: Flow<List<SshProfile>> =
         profileDao.observeAllProfiles().map { list -> list.map { it.toDomain() } }
@@ -199,29 +207,156 @@ class ProfileRepository(
         importedProfiles: List<SshProfile>,
         importedGroups: List<String>
     ): Int {
-        ensureBuiltInGroups()
-        importedGroups.forEach { ensureGroupExists(it) }
-        val existingIds = profileDao.getAllProfilesOnce().map { it.id }.toSet()
-        var importedCount = 0
-        importedProfiles.forEach { raw ->
-            val safeId = if (raw.id in existingIds || raw.id.isBlank()) {
-                UUID.randomUUID().toString()
-            } else {
-                raw.id
+        val bundle = ProfileBackupBundle(
+            formatVersion = ProfileBackupBundle.CURRENT_FORMAT_VERSION,
+            groups = importedGroups,
+            profiles = importedProfiles
+        )
+        return importWithStrategy(bundle, ImportDuplicateStrategy.KEEP_BOTH).totalApplied
+    }
+
+    /**
+     * Atomically imports profiles inside a Room transaction using the selected duplicate resolution strategy.
+     * Re-encrypts any embedded backup credentials through this device's CredentialVault (Android Keystore).
+     * On failure, rolls back the Room transaction and deletes any newly written vault files.
+     */
+    suspend fun importWithStrategy(
+        bundle: ProfileBackupBundle,
+        duplicateStrategy: ImportDuplicateStrategy
+    ): ImportExecutionSummary {
+        val existingProfiles = profileDao.getAllProfilesOnce().map { it.toDomain() }
+        val existingById = existingProfiles.associateBy { it.id }.toMutableMap()
+        val existingByEndpoint = existingProfiles.associateBy { BackupCryptoManager.endpointKey(it) }.toMutableMap()
+
+        val newlyCreatedVaultRefs = mutableListOf<String>()
+        val obsoleteVaultRefsToDeleteAfterCommit = mutableListOf<String>()
+
+        var importedNew = 0
+        var replaced = 0
+        var keptBoth = 0
+        var skippedDuplicate = 0
+        var reEncryptedCreds = 0
+        var skippedInvalid = bundle.rawInvalidCount
+
+        val dbBlock: suspend () -> Unit = {
+            ensureBuiltInGroups()
+            bundle.groups.forEach { ensureGroupExists(it) }
+            val now = System.currentTimeMillis()
+
+            bundle.profiles.forEach { raw ->
+                if (!BackupCryptoManager.isValidProfile(raw)) {
+                    skippedInvalid++
+                    return@forEach
+                }
+
+                val endpointKey = BackupCryptoManager.endpointKey(raw)
+                val matchedExisting = existingById[raw.id] ?: existingByEndpoint[endpointKey]
+
+                val targetId: String
+                val targetName: String
+                var targetExistingCredRef: String? = null
+
+                if (matchedExisting != null) {
+                    when (duplicateStrategy) {
+                        ImportDuplicateStrategy.SKIP -> {
+                            skippedDuplicate++
+                            return@forEach
+                        }
+                        ImportDuplicateStrategy.REPLACE -> {
+                            targetId = matchedExisting.id
+                            targetName = raw.name.trim()
+                            targetExistingCredRef = matchedExisting.credentialRefId
+                            replaced++
+                        }
+                        ImportDuplicateStrategy.KEEP_BOTH -> {
+                            var candidateId = UUID.randomUUID().toString()
+                            while (existingById.containsKey(candidateId)) {
+                                candidateId = UUID.randomUUID().toString()
+                            }
+                            targetId = candidateId
+                            targetName = if (raw.id == matchedExisting.id || raw.name.equals(matchedExisting.name, ignoreCase = true)) {
+                                "${raw.name.trim()} (Imported)"
+                            } else {
+                                raw.name.trim()
+                            }
+                            keptBoth++
+                        }
+                    }
+                } else {
+                    targetId = raw.id.ifBlank { UUID.randomUUID().toString() }
+                    targetName = raw.name.trim()
+                    importedNew++
+                }
+
+                val embeddedCred = bundle.embeddedCredentials[raw.id]
+                val finalCredRefId = if (embeddedCred != null && embeddedCred.secretMaterial.isNotBlank()) {
+                    val freshRefId = when (embeddedCred.kind) {
+                        StoredCredentialKind.PASSWORD -> {
+                            val chars = embeddedCred.secretMaterial.toCharArray()
+                            try {
+                                credentialVault.savePassword(null, chars)
+                            } finally {
+                                chars.fill('\u0000')
+                            }
+                        }
+                        StoredCredentialKind.PRIVATE_KEY -> {
+                            credentialVault.savePrivateKey(null, embeddedCred.secretMaterial)
+                        }
+                    }
+                    newlyCreatedVaultRefs += freshRefId
+                    if (targetExistingCredRef != null && targetExistingCredRef != freshRefId) {
+                        obsoleteVaultRefsToDeleteAfterCommit += targetExistingCredRef
+                    }
+                    reEncryptedCreds++
+                    freshRefId
+                } else {
+                    // When replacing metadata-only without embedded credentials, keep existing vault ref if same host/auth
+                    targetExistingCredRef
+                }
+
+                val finalProfile = raw.copy(
+                    id = targetId,
+                    name = targetName,
+                    host = raw.host.trim(),
+                    username = raw.username.trim(),
+                    groupName = raw.groupName.ifBlank { "Home" },
+                    credentialRefId = finalCredRefId,
+                    createdAt = matchedExisting?.takeIf { duplicateStrategy == ImportDuplicateStrategy.REPLACE }?.createdAt ?: now,
+                    updatedAt = now
+                )
+                ensureGroupExists(finalProfile.groupName)
+                profileDao.upsertProfile(SshProfileEntity.fromDomain(finalProfile))
+                existingById[finalProfile.id] = finalProfile
+                existingByEndpoint[BackupCryptoManager.endpointKey(finalProfile)] = finalProfile
             }
-            val safeName = if (raw.id in existingIds) "${raw.name} (Imported)" else raw.name
-            val cleanProfile = raw.copy(
-                id = safeId,
-                name = safeName,
-                credentialRefId = null,
-                createdAt = System.currentTimeMillis(),
-                updatedAt = System.currentTimeMillis()
-            )
-            ensureGroupExists(cleanProfile.groupName)
-            profileDao.upsertProfile(SshProfileEntity.fromDomain(cleanProfile))
-            importedCount++
         }
-        return importedCount
+
+        try {
+            if (database != null) {
+                database.withTransaction { dbBlock() }
+            } else {
+                dbBlock()
+            }
+            // Safe to prune superseded credentials only after DB commit succeeds
+            obsoleteVaultRefsToDeleteAfterCommit.forEach { oldRef ->
+                runCatching { credentialVault.deleteCredential(oldRef) }
+            }
+        } catch (t: Throwable) {
+            // Roll back any newly created vault credential files on DB transaction failure
+            newlyCreatedVaultRefs.forEach { newRef ->
+                runCatching { credentialVault.deleteCredential(newRef) }
+            }
+            throw t
+        }
+
+        return ImportExecutionSummary(
+            importedNewCount = importedNew,
+            replacedCount = replaced,
+            keptBothCount = keptBoth,
+            skippedDuplicateCount = skippedDuplicate,
+            reEncryptedCredentialsCount = reEncryptedCreds,
+            skippedInvalidCount = skippedInvalid
+        )
     }
 
     suspend fun getAllReferencedCredentialIds(): Set<String> {
@@ -358,5 +493,34 @@ class SnippetRepository(
 
     suspend fun deleteSnippet(id: String) {
         snippetDao.deleteById(id)
+    }
+}
+
+class TmuxSessionRepository(
+    private val tmuxSessionDao: TmuxSessionDao
+) {
+    fun observeForProfile(profileId: String): Flow<List<ManagedTmuxSession>> =
+        tmuxSessionDao.observeForProfile(profileId).map { list -> list.map { it.toDomain() } }
+
+    suspend fun getAllOnce(): List<ManagedTmuxSession> =
+        tmuxSessionDao.getAllOnce().map { it.toDomain() }
+
+    suspend fun getForProfileOnce(profileId: String): List<ManagedTmuxSession> =
+        tmuxSessionDao.getForProfileOnce(profileId).map { it.toDomain() }
+
+    suspend fun recordSession(session: ManagedTmuxSession) {
+        tmuxSessionDao.upsert(TmuxSessionEntity.fromDomain(session))
+    }
+
+    suspend fun touchAttached(sessionName: String, timestamp: Long = System.currentTimeMillis()) {
+        tmuxSessionDao.touchAttached(sessionName, timestamp)
+    }
+
+    suspend fun removeSession(sessionName: String) {
+        tmuxSessionDao.deleteByName(sessionName)
+    }
+
+    suspend fun removeForProfile(profileId: String) {
+        tmuxSessionDao.deleteForProfile(profileId)
     }
 }

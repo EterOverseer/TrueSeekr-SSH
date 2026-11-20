@@ -105,10 +105,13 @@ fun ConnectionStatusPill(
 
     val targetTint = when (status) {
         SessionStatus.CONNECTED -> colors.lime
+        SessionStatus.CONNECTION_IDLE -> colors.cyan
         SessionStatus.CONNECTING,
         SessionStatus.VERIFYING_HOST,
         SessionStatus.AUTHENTICATING -> colors.cyan
+        SessionStatus.CHECKING_CONNECTION,
         SessionStatus.RECONNECTING -> colors.amber
+        SessionStatus.CONNECTION_LOST,
         SessionStatus.ERROR -> colors.red
         SessionStatus.DISCONNECTED,
         SessionStatus.IDLE -> colors.textSecondary
@@ -120,11 +123,13 @@ fun ConnectionStatusPill(
     )
     val isInProgress = status == SessionStatus.CONNECTING ||
         status == SessionStatus.VERIFYING_HOST ||
-        status == SessionStatus.AUTHENTICATING
+        status == SessionStatus.AUTHENTICATING ||
+        status == SessionStatus.CHECKING_CONNECTION
 
     val icon = when (status) {
-        SessionStatus.CONNECTED -> Icons.Default.CheckCircle
+        SessionStatus.CONNECTED, SessionStatus.CONNECTION_IDLE -> Icons.Default.CheckCircle
         SessionStatus.RECONNECTING -> Icons.Default.Refresh
+        SessionStatus.CONNECTION_LOST,
         SessionStatus.ERROR -> Icons.Default.ErrorOutline
         SessionStatus.DISCONNECTED -> Icons.Default.LinkOff
         else -> Icons.Default.RadioButtonUnchecked

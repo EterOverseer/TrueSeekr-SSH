@@ -4,21 +4,26 @@ import com.example.core.Formatters
 import com.example.core.NetworkMonitor
 import com.example.data.KnownHostRepository
 import com.example.data.ProfileRepository
+import com.example.data.TmuxSessionRepository
 import com.example.domain.AuthMethodType
 import com.example.domain.CredentialPromptRequest
 import com.example.domain.DiskMountInfo
 import com.example.domain.HostKeyVerificationRequest
+import com.example.domain.ManagedTmuxSession
 import com.example.domain.NetworkInterfaceInfo
+import com.example.domain.RemoteTmuxSession
 import com.example.domain.ServerMetrics
 import com.example.domain.SessionConnectionMeta
 import com.example.domain.SessionStatus
 import com.example.domain.SshProfile
+import com.example.domain.TmuxCheckResult
 import com.example.network.TailscaleConnectionCoordinator
 import com.example.network.TailscalePreparationResult
 import com.example.network.TailscaleProgressState
 import com.example.network.VpnOwnership
 import com.example.security.CredentialVault
 import com.example.settings.AppPreferencesRepository
+import com.example.settings.AppSettings
 import com.example.terminal.TerminalSessionHandle
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -59,6 +64,8 @@ data class ManagedSessionUiState(
     val meta: SessionConnectionMeta = SessionConnectionMeta(),
     val errorMessage: String? = null,
     val networkWarning: String? = null,
+    val keepAliveNotice: String? = null,
+    val missedKeepAliveCount: Int = 0,
     val tailscaleState: TailscaleProgressState = TailscaleProgressState.IDLE,
     val vpnOwnership: VpnOwnership = VpnOwnership.NONE,
     val tailscaleNotice: String? = null,
@@ -76,11 +83,14 @@ class ManagedSessionRuntime(
     var sftpClient: SftpClient? = null
     var ioJobs: MutableList<Job> = mutableListOf()
     var lastVerifiedFingerprint: String = ""
+    @Volatile var lastActivityMs: Long = System.currentTimeMillis()
+    var healthCache: ServerHealthSessionCache = ServerHealthSessionCache()
 }
 
 /**
  * Coordinates real SSH connections via ConnectBot cbssh, strict host key verification,
- * interactive PTY sessions via termlib, and SFTP subsystems.
+ * SSH-level keepalive probing, background foreground-service sync, interactive PTY sessions
+ * via termlib, Server Health telemetry, opt-in tmux integration, and SFTP subsystems.
  */
 class SshSessionManager(
     private val profileRepository: ProfileRepository,
@@ -88,7 +98,9 @@ class SshSessionManager(
     private val credentialVault: CredentialVault,
     private val networkMonitor: NetworkMonitor,
     private val preferencesRepository: AppPreferencesRepository? = null,
-    private val tailscaleCoordinator: TailscaleConnectionCoordinator? = null
+    private val tailscaleCoordinator: TailscaleConnectionCoordinator? = null,
+    private val tmuxSessionRepository: TmuxSessionRepository? = null,
+    private val keepAliveServiceBridge: KeepAliveServiceBridge? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -110,14 +122,20 @@ class SshSessionManager(
     val credentialPrompt: StateFlow<CredentialPromptRequest?> = _credentialPrompt.asStateFlow()
 
     @Volatile
-    private var cachedScrollbackLines: Int = 2000
+    private var latestSettings: AppSettings = AppSettings()
 
     init {
         preferencesRepository?.let { repo ->
             scope.launch {
                 repo.settings.collect { s ->
-                    cachedScrollbackLines = s.scrollbackLines
+                    latestSettings = s
+                    syncBackgroundService()
                 }
+            }
+        }
+        scope.launch {
+            _sessions.collect {
+                syncBackgroundService()
             }
         }
         scope.launch {
@@ -125,7 +143,7 @@ class SshSessionManager(
                 if (!status.isConnected) {
                     _sessions.update { list ->
                         list.map { s ->
-                            if (s.status == SessionStatus.CONNECTED) {
+                            if (s.status.isLiveConnected) {
                                 s.copy(networkWarning = "เครือข่ายขาดการเชื่อมต่อ — แตะ Reconnect เมื่อพร้อม")
                             } else s
                         }
@@ -147,6 +165,23 @@ class SshSessionManager(
                 }
             }
         }
+    }
+
+    private fun syncBackgroundService() {
+        val bridge = keepAliveServiceBridge ?: return
+        val s = latestSettings
+        val activeCount = _sessions.value.count {
+            it.status.isLiveConnected ||
+                it.status == SessionStatus.CONNECTING ||
+                it.status == SessionStatus.VERIFYING_HOST ||
+                it.status == SessionStatus.AUTHENTICATING ||
+                it.status == SessionStatus.RECONNECTING
+        }
+        bridge.syncState(
+            enabled = s.backgroundKeepAliveEnabled,
+            keepCpuAwake = s.keepCpuAwakeWhileConnected,
+            activeCount = activeCount
+        )
     }
 
     fun selectSession(sessionId: String) {
@@ -202,7 +237,6 @@ class SshSessionManager(
         scope.launch {
             var workingProfile = profileRepository.getProfileById(profile.id) ?: profile
 
-            // Resolve required secret before opening network socket if possible
             var passwordStr: String? = oneTimePassword?.let { String(it) }
             var privateKeyStr: String? = oneTimePrivateKeyPem
             var passphraseStr: String? = oneTimePassphrase?.let { String(it) }
@@ -275,6 +309,7 @@ class SshSessionManager(
         val runtime = runtimes[sessionId] ?: return
         scope.launch {
             closeTransportOnly(runtime)
+            runtime.healthCache = ServerHealthSessionCache()
             val freshProfile = profileRepository.getProfileById(runtime.profile.id) ?: runtime.profile
             runtime.profile = freshProfile
             updateSessionState(sessionId) {
@@ -282,7 +317,9 @@ class SshSessionManager(
                     profile = freshProfile,
                     status = SessionStatus.RECONNECTING,
                     errorMessage = null,
-                    networkWarning = null
+                    networkWarning = null,
+                    keepAliveNotice = null,
+                    missedKeepAliveCount = 0
                 )
             }
             connectProfile(freshProfile)
@@ -293,12 +330,15 @@ class SshSessionManager(
         val runtime = runtimes[sessionId] ?: return
         scope.launch {
             closeTransportOnly(runtime)
+            runtime.healthCache = ServerHealthSessionCache()
             tailscaleCoordinator?.onSessionEnded(sessionId)
             updateSessionState(sessionId) {
                 it.copy(
                     status = SessionStatus.DISCONNECTED,
                     latencyMs = null,
                     networkWarning = null,
+                    keepAliveNotice = null,
+                    missedKeepAliveCount = 0,
                     tailscaleState = TailscaleProgressState.IDLE,
                     vpnOwnership = tailscaleCoordinator?.diagnosticSnapshot?.value?.ownership ?: VpnOwnership.NONE,
                     tailscaleNotice = null
@@ -327,11 +367,14 @@ class SshSessionManager(
         scope.launch {
             snapshotRuntimes.forEach { runtime ->
                 closeTransportOnly(runtime)
+                runtime.healthCache = ServerHealthSessionCache()
                 updateSessionState(runtime.sessionId) {
                     it.copy(
                         status = SessionStatus.DISCONNECTED,
                         latencyMs = null,
                         networkWarning = null,
+                        keepAliveNotice = null,
+                        missedKeepAliveCount = 0,
                         tailscaleState = TailscaleProgressState.IDLE,
                         tailscaleNotice = null
                     )
@@ -369,56 +412,124 @@ class SshSessionManager(
     }
 
     /**
-     * Executes controlled read-only diagnostic commands on the connected SSH server to populate
-     * the Server Dashboard with real telemetry (never fabricated values).
+     * Collects bounded, read-only server telemetry reusing the existing SSH connection.
+     * Supports Fastfetch JSON (if installed) and native Linux `/proc` + POSIX `df` fallbacks.
      */
-    suspend fun fetchServerMetrics(sessionId: String): Result<ServerMetrics> = withContext(Dispatchers.IO) {
+    suspend fun fetchServerMetrics(
+        sessionId: String,
+        forceSlowRefresh: Boolean = false
+    ): Result<ServerMetrics> = withContext(Dispatchers.IO) {
         val runtime = runtimes[sessionId]
             ?: return@withContext Result.failure(IllegalStateException("ไม่พบ Session ที่เชื่อมต่ออยู่"))
         val client = runtime.sshClient
             ?: return@withContext Result.failure(IllegalStateException("SSH ยังไม่ได้เชื่อมต่อ"))
         if (!client.isAuthenticated) {
-            return@withContext Result.failure(IllegalStateException("Session ยังไม่ผ่านการยืนยันตัวตน"))
+            return@withContext Result.failure(IllegalStateException("Session ยังไม่ได้เชื่อมต่อหรือหลุดไปแล้ว"))
         }
 
-        val cmd = listOf(
-            "echo '===HOST===' && (hostname 2>/dev/null || uname -n)",
-            "echo '===OS===' && (cat /etc/os-release 2>/dev/null | grep '^PRETTY_NAME=' | cut -d= -f2- | tr -d '\"' || uname -s)",
-            "echo '===KERNEL===' && uname -sr",
-            "echo '===UPTIME===' && (uptime -p 2>/dev/null || uptime 2>/dev/null)",
-            "echo '===LOAD===' && (cat /proc/loadavg 2>/dev/null | awk '{print $1\" \"$2\" \"$3}')",
-            "echo '===CPU===' && (grep 'cpu ' /proc/stat 2>/dev/null | awk '{u=$2+$4; t=$2+$4+$5; if(t>0) printf \"%.1f\", u*100/t}')",
-            "echo '===MEM===' && (free -m 2>/dev/null | awk 'NR==2{print $3\" \"$2}')",
-            "echo '===DISK===' && (df -kP 2>/dev/null | awk 'NR>1 && $1 !~ /^(tmpfs|devtmpfs|udev|overlay)/ {print $1\"|\"$6\"|\"$3\"|\"$2\"|\"$5}' | head -n 6)",
-            "echo '===NET===' && (ip -o -4 addr show 2>/dev/null | awk '{print $2\"|\"$4}' | head -n 6)"
-        ).joinToString("; ")
-
+        val executor = SshRemoteCommandExecutor(client)
         val execStartNs = System.nanoTime()
-        val execSession = client.openSession()
-            ?: return@withContext Result.failure(IllegalStateException("ไม่สามารถเปิด Exec channel เพื่ออ่านค่าเซิร์ฟเวอร์ได้"))
-
-        try {
-            val started = execSession.requestExec(cmd)
-            if (!started) {
-                return@withContext Result.failure(IllegalStateException("เซิร์ฟเวอร์ไม่อนุญาตให้รันคำสั่งอ่านสถิติ (exec disabled)"))
-            }
-
-            val outputBuilder = StringBuilder()
-            val stdout = execSession.stdout
-            while (true) {
-                val chunk = stdout.receiveCatching().getOrNull() ?: break
-                outputBuilder.append(String(chunk, Charsets.UTF_8))
-                if (outputBuilder.length > 64_000) break
-            }
+        val result = ServerHealthCollector.collect(
+            executor = executor,
+            cache = runtime.healthCache,
+            forceSlowRefresh = forceSlowRefresh
+        )
+        if (result.isSuccess) {
             val measuredRttMs = ((System.nanoTime() - execStartNs) / 1_000_000L).coerceAtLeast(1L)
             updateSessionState(sessionId) { it.copy(latencyMs = measuredRttMs) }
-            val raw = outputBuilder.toString()
-            Result.success(parseServerMetrics(raw))
-        } catch (t: Throwable) {
-            Result.failure(IllegalStateException("อ่านข้อมูลเซิร์ฟเวอร์ไม่สำเร็จ: ${Formatters.redactDiagnosticText(t.message)}"))
-        } finally {
-            runCatching { execSession.close() }
         }
+        result
+    }
+
+    suspend fun checkTmuxAvailability(sessionId: String): TmuxCheckResult = withContext(Dispatchers.IO) {
+        val runtime = runtimes[sessionId]
+            ?: return@withContext TmuxCheckResult.Error("ไม่พบ Session ที่เชื่อมต่ออยู่")
+        val client = runtime.sshClient
+            ?: return@withContext TmuxCheckResult.Error("SSH ยังไม่ได้เชื่อมต่อ")
+        TmuxManager.checkAvailability(SshRemoteCommandExecutor(client))
+    }
+
+    suspend fun listRemoteTmuxSessions(sessionId: String): Result<List<RemoteTmuxSession>> = withContext(Dispatchers.IO) {
+        val runtime = runtimes[sessionId]
+            ?: return@withContext Result.failure(IllegalStateException("ไม่พบ Session ที่เชื่อมต่ออยู่"))
+        val client = runtime.sshClient
+            ?: return@withContext Result.failure(IllegalStateException("SSH ยังไม่ได้เชื่อมต่อ"))
+        TmuxManager.listRemoteSessions(
+            executor = SshRemoteCommandExecutor(client),
+            profileId = runtime.profile.id,
+            managedPrefix = latestSettings.tmuxSessionPrefix,
+            repository = tmuxSessionRepository
+        )
+    }
+
+    suspend fun getSavedTmuxSessionsForProfile(profileId: String): List<ManagedTmuxSession> {
+        return tmuxSessionRepository?.getForProfileOnce(profileId).orEmpty()
+    }
+
+    suspend fun attachOrCreateTmuxSession(
+        sessionId: String,
+        requestedName: String? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val runtime = runtimes[sessionId]
+            ?: return@withContext Result.failure(IllegalStateException("ไม่พบ Session ที่เชื่อมต่ออยู่"))
+        val shell = runtime.shellSession
+            ?: return@withContext Result.failure(IllegalStateException("ยังไม่มี PTY Shell ที่เปิดอยู่"))
+        if (!shell.isOpen) {
+            return@withContext Result.failure(IllegalStateException("PTY Shell ถูกปิดไปแล้ว"))
+        }
+
+        val sessionName = if (requestedName.isNullOrBlank()) {
+            TmuxManager.generateSessionName(
+                prefix = latestSettings.tmuxSessionPrefix,
+                profileId = runtime.profile.id,
+                sessionId = runtime.sessionId
+            )
+        } else {
+            val cleaned = TmuxManager.sanitizeSessionNameInput(requestedName)
+            if (!TmuxManager.isValidSafeSessionName(cleaned)) {
+                return@withContext Result.failure(IllegalArgumentException("ชื่อ Session ไม่ถูกต้อง"))
+            }
+            cleaned
+        }
+
+        val attachCmd = TmuxManager.buildAttachCommand(sessionName)
+        shell.write(attachCmd.toByteArray(Charsets.UTF_8))
+        runtime.lastActivityMs = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        tmuxSessionRepository?.recordSession(
+            ManagedTmuxSession(
+                sessionName = sessionName,
+                profileId = runtime.profile.id,
+                createdAt = now,
+                lastAttachedAt = now
+            )
+        )
+        Result.success(sessionName)
+    }
+
+    suspend fun detachCurrentTmuxSession(sessionId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val runtime = runtimes[sessionId]
+            ?: return@withContext Result.failure(IllegalStateException("ไม่พบ Session ที่เชื่อมต่ออยู่"))
+        val shell = runtime.shellSession
+            ?: return@withContext Result.failure(IllegalStateException("ยังไม่มี PTY Shell ที่เปิดอยู่"))
+        if (!shell.isOpen) {
+            return@withContext Result.failure(IllegalStateException("PTY Shell ถูกปิดไปแล้ว"))
+        }
+        shell.write(TmuxManager.DETACH_SEQUENCE)
+        runtime.lastActivityMs = System.currentTimeMillis()
+        Result.success(Unit)
+    }
+
+    suspend fun killTmuxSession(sessionId: String, sessionName: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val runtime = runtimes[sessionId]
+            ?: return@withContext Result.failure(IllegalStateException("ไม่พบ Session ที่เชื่อมต่ออยู่"))
+        val client = runtime.sshClient
+            ?: return@withContext Result.failure(IllegalStateException("SSH ยังไม่ได้เชื่อมต่อ"))
+        TmuxManager.killRemoteSession(
+            executor = SshRemoteCommandExecutor(client),
+            sessionName = sessionName,
+            repository = tmuxSessionRepository
+        )
     }
 
     private suspend fun performConnectInternal(
@@ -429,6 +540,7 @@ class SshSessionManager(
         passphraseStr: String?
     ) {
         val runtime = runtimes[sessionId] ?: return
+        runtime.healthCache = ServerHealthSessionCache()
         var leaseAcquiredForAttempt = false
         try {
             updateSessionState(sessionId) {
@@ -436,6 +548,8 @@ class SshSessionManager(
                     status = SessionStatus.CONNECTING,
                     errorMessage = null,
                     networkWarning = null,
+                    keepAliveNotice = null,
+                    missedKeepAliveCount = 0,
                     showOpenTailscaleAction = false,
                     showInstallTailscaleAction = false
                 )
@@ -519,7 +633,10 @@ class SshSessionManager(
                 }
             )
 
-            // Enforce modern SSH cryptography policy (Ed25519, RSA-SHA2, ChaCha20/AES-GCM, Curve25519)
+            val currentSettings = preferencesRepository?.settings?.first() ?: latestSettings
+            val keepAliveConfig = SshKeepAliveWatchdog.resolveConfig(profile, currentSettings)
+
+            // Enforce modern SSH cryptography policy + native SSH transport keepalive interval
             val cryptoPolicy = SshCryptoPolicy.resolve(CryptoPolicyPreset.DEFAULT)
             val config = SshClientConfig {
                 host = profile.host
@@ -528,7 +645,7 @@ class SshSessionManager(
                 cryptoPolicy(cryptoPolicy)
                 autoDisconnectOnLastChannelClose = false
                 handshakeTimeoutMs = profile.connectTimeoutSec.coerceIn(5, 120) * 1000L
-                keepAliveIntervalMs = profile.keepAliveIntervalSec.coerceIn(0, 300) * 1000L
+                keepAliveIntervalMs = if (keepAliveConfig.enabled) keepAliveConfig.intervalSec * 1000L else 0L
             }
             val client = SshClient(config)
             runtime.sshClient = client
@@ -627,7 +744,6 @@ class SshSessionManager(
 
             when (authResult) {
                 is AuthResult.Success -> {
-                    // Record successful connection ONLY after authentication succeeds!
                     profileRepository.recordSuccessfulConnection(profile.id)
 
                     val connInfo = client.connectionInfo
@@ -650,6 +766,7 @@ class SshSessionManager(
                         return
                     }
                     runtime.shellSession = session
+                    runtime.lastActivityMs = System.currentTimeMillis()
 
                     val (cols, rows) = runtime.terminalHandle.currentDimensions()
                     session.requestPty(
@@ -677,6 +794,8 @@ class SshSessionManager(
                             connectedAtMs = System.currentTimeMillis(),
                             meta = meta,
                             errorMessage = null,
+                            keepAliveNotice = null,
+                            missedKeepAliveCount = 0,
                             tailscaleState = if (leaseAcquiredForAttempt) TailscaleProgressState.CONNECTED else it.tailscaleState
                         )
                     }
@@ -686,7 +805,7 @@ class SshSessionManager(
                         session.write(safeCd.toByteArray(Charsets.UTF_8))
                     }
 
-                    attachSessionIo(runtime, client, session)
+                    attachSessionIo(runtime, client, session, keepAliveConfig)
                 }
                 is AuthResult.Failure -> {
                     client.disconnect()
@@ -724,7 +843,8 @@ class SshSessionManager(
     private fun attachSessionIo(
         runtime: ManagedSessionRuntime,
         client: SshClient,
-        session: SshSession
+        session: SshSession,
+        keepAliveConfig: EffectiveKeepAliveConfig
     ) {
         runtime.ioJobs.forEach { it.cancel() }
         runtime.ioJobs.clear()
@@ -732,24 +852,24 @@ class SshSessionManager(
         val stdoutJob = scope.launch {
             try {
                 for (chunk in session.stdout) {
+                    runtime.lastActivityMs = System.currentTimeMillis()
                     withContext(Dispatchers.Main) {
                         runtime.terminalHandle.writeServerOutput(chunk)
                     }
                 }
             } catch (_: Throwable) {
-                // Channel closed
             }
         }
 
         val stderrJob = scope.launch {
             try {
                 for (chunk in session.stderr) {
+                    runtime.lastActivityMs = System.currentTimeMillis()
                     withContext(Dispatchers.Main) {
                         runtime.terminalHandle.writeServerOutput(chunk)
                     }
                 }
             } catch (_: Throwable) {
-                // Channel closed
             }
         }
 
@@ -757,11 +877,13 @@ class SshSessionManager(
             try {
                 client.disconnectedFlow.collect { cause ->
                     val currentStatus = _sessions.value.firstOrNull { it.sessionId == runtime.sessionId }?.status
-                    if (currentStatus == SessionStatus.CONNECTED) {
+                    if (currentStatus != null && currentStatus.isLiveConnected) {
                         updateSessionState(runtime.sessionId) {
                             it.copy(
                                 status = SessionStatus.DISCONNECTED,
                                 errorMessage = cause?.message?.let { msg -> Formatters.redactDiagnosticText(msg) },
+                                keepAliveNotice = null,
+                                missedKeepAliveCount = 0,
                                 tailscaleState = TailscaleProgressState.IDLE
                             )
                         }
@@ -779,9 +901,15 @@ class SshSessionManager(
             try {
                 session.exitInfo.await()
                 delay(150)
-                if (_sessions.value.firstOrNull { it.sessionId == runtime.sessionId }?.status == SessionStatus.CONNECTED) {
+                val currentStatus = _sessions.value.firstOrNull { it.sessionId == runtime.sessionId }?.status
+                if (currentStatus != null && currentStatus.isLiveConnected) {
                     updateSessionState(runtime.sessionId) {
-                        it.copy(status = SessionStatus.DISCONNECTED, tailscaleState = TailscaleProgressState.IDLE)
+                        it.copy(
+                            status = SessionStatus.DISCONNECTED,
+                            keepAliveNotice = null,
+                            missedKeepAliveCount = 0,
+                            tailscaleState = TailscaleProgressState.IDLE
+                        )
                     }
                     tailscaleCoordinator?.onSessionEnded(runtime.sessionId)
                 }
@@ -789,7 +917,49 @@ class SshSessionManager(
             }
         }
 
-        runtime.ioJobs.addAll(listOf(stdoutJob, stderrJob, disconnectJob, exitWatchJob))
+        val jobs = mutableListOf(stdoutJob, stderrJob, disconnectJob, exitWatchJob)
+
+        if (keepAliveConfig.enabled) {
+            val watchdogJob = scope.launch {
+                SshKeepAliveWatchdog.runMonitorLoop(
+                    config = keepAliveConfig,
+                    lastActivityMsProvider = { runtime.lastActivityMs },
+                    pingFn = { timeoutMs -> SshKeepAliveWatchdog.probeSshClient(client, timeoutMs) },
+                    onStatusUpdated = { newStatus, rttMs, missed, notice ->
+                        updateSessionState(runtime.sessionId) { current ->
+                            if (!current.status.isLiveConnected) current
+                            else current.copy(
+                                status = newStatus,
+                                latencyMs = rttMs ?: current.latencyMs,
+                                missedKeepAliveCount = missed,
+                                keepAliveNotice = notice
+                            )
+                        }
+                    },
+                    onConnectionLost = { missed ->
+                        closeTransportOnly(runtime)
+                        tailscaleCoordinator?.onSessionEnded(runtime.sessionId)
+                        updateSessionState(runtime.sessionId) {
+                            it.copy(
+                                status = SessionStatus.CONNECTION_LOST,
+                                missedKeepAliveCount = missed,
+                                keepAliveNotice = null,
+                                errorMessage = "ไม่ได้รับการตอบสนอง SSH Keepalive ($missed/${keepAliveConfig.maxMissed} ครั้ง) — การเชื่อมต่อขาดหาย",
+                                tailscaleState = TailscaleProgressState.IDLE
+                            )
+                        }
+                        withContext(Dispatchers.Main) {
+                            runtime.terminalHandle.writeLocalNotice(
+                                "\r\n[การเชื่อมต่อ SSH ขาดหาย (Keepalive missed $missed/${keepAliveConfig.maxMissed}) — กด Reconnect เพื่อเชื่อมต่อใหม่]"
+                            )
+                        }
+                    }
+                )
+            }
+            jobs += watchdogJob
+        }
+
+        runtime.ioJobs.addAll(jobs)
     }
 
     private fun ensureOrCreateRuntime(profile: SshProfile): String {
@@ -802,13 +972,14 @@ class SshSessionManager(
             return existing.sessionId
         }
 
-        val configuredScrollback = cachedScrollbackLines
+        val configuredScrollback = latestSettings.scrollbackLines
 
         val sessionId = UUID.randomUUID().toString()
         lateinit var runtime: ManagedSessionRuntime
         val handle = TerminalSessionHandle(
             initialTheme = profile.terminalTheme,
             onSendBytesToSsh = { bytes ->
+                runtime.lastActivityMs = System.currentTimeMillis()
                 val session = runtime.shellSession
                 if (session != null && session.isOpen) {
                     scope.launch {

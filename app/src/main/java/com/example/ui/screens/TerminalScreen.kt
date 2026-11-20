@@ -6,6 +6,7 @@ import android.content.Context
 import android.graphics.Typeface
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -39,22 +40,28 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DynamicFeed
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MonitorHeart
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -67,6 +74,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -77,6 +85,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
@@ -89,15 +101,22 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.core.Formatters
 import com.example.domain.CommandSnippet
+import com.example.domain.DashboardDataSource
+import com.example.domain.HealthRefreshInterval
+import com.example.domain.MetricAvailability
+import com.example.domain.RemoteTmuxSession
 import com.example.domain.SessionStatus
 import com.example.domain.TerminalFontFamily
+import com.example.domain.TmuxCheckResult
 import com.example.network.TailscaleProgressState
 import com.example.network.VpnOwnership
 import com.example.settings.AppSettings
 import com.example.ssh.ManagedSessionUiState
+import com.example.ssh.TmuxManager
 import com.example.terminal.MetricsLoadState
 import com.example.terminal.TerminalPaletteProvider
 import com.example.terminal.TerminalViewModel
+import com.example.terminal.TmuxSheetUiState
 import com.example.ui.components.BannerTone
 import com.example.ui.components.ConnectionStatusPill
 import com.example.ui.components.HostTrustIndicator
@@ -131,15 +150,20 @@ fun TerminalScreen(
     val searchVisible by viewModel.searchVisible.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchMatches by viewModel.searchMatches.collectAsStateWithLifecycle()
-    val metricsState by viewModel.metricsState.collectAsStateWithLifecycle()
+    val metricsBySession by viewModel.metricsBySession.collectAsStateWithLifecycle()
+    val dashboardInterval by viewModel.dashboardInterval.collectAsStateWithLifecycle()
+    val tmuxUiState by viewModel.tmuxUiState.collectAsStateWithLifecycle()
+    val reconnectTmuxMap by viewModel.reconnectTmuxSuggestions.collectAsStateWithLifecycle()
 
     val activeSession = sessions.firstOrNull { it.sessionId == activeSessionId } ?: sessions.firstOrNull()
     val handle = activeSession?.let { viewModel.getHandle(it.sessionId) }
+    val activeMetricsState = activeSession?.let { metricsBySession[it.sessionId] } ?: MetricsLoadState.Idle
 
     var showSoftKeyboard by remember { mutableStateOf(false) }
     var showFunctionKeys by remember { mutableStateOf(false) }
     var showSnippetsSheet by remember { mutableStateOf(false) }
     var showDashboardSheet by remember { mutableStateOf(false) }
+    var showTmuxSheet by remember { mutableStateOf(false) }
     var snippetConfirmTarget by remember { mutableStateOf<CommandSnippet?>(null) }
 
     val monoTypeface = remember(context, appSettings.terminalFontFamily) {
@@ -150,6 +174,14 @@ fun TerminalScreen(
         }
     }
     val focusRequester = remember { FocusRequester() }
+
+    // Detect re-attachable TrueSeekrSSH-managed tmux sessions after SSH connect/reconnect
+    LaunchedEffect(activeSession?.sessionId, activeSession?.status, appSettings.tmuxIntegrationEnabled) {
+        val current = activeSession
+        if (current != null && appSettings.tmuxIntegrationEnabled && current.status == SessionStatus.CONNECTED) {
+            viewModel.checkReconnectTmuxSuggestions(current.sessionId, current.profile.id)
+        }
+    }
 
     if (sessions.isEmpty() || activeSession == null || handle == null) {
         Box(
@@ -189,10 +221,13 @@ fun TerminalScreen(
                         val isSelected = session.sessionId == activeSession.sessionId
                         val dotColor = when (session.status) {
                             SessionStatus.CONNECTED -> colors.lime
+                            SessionStatus.CONNECTION_IDLE -> colors.cyan
                             SessionStatus.CONNECTING,
                             SessionStatus.VERIFYING_HOST,
                             SessionStatus.AUTHENTICATING -> colors.cyan
+                            SessionStatus.CHECKING_CONNECTION,
                             SessionStatus.RECONNECTING -> colors.amber
+                            SessionStatus.CONNECTION_LOST,
                             SessionStatus.ERROR -> colors.red
                             else -> colors.textSecondary
                         }
@@ -276,7 +311,7 @@ fun TerminalScreen(
                             modifier = Modifier.testTag("terminal_tailscale_status_pill")
                         )
                     }
-                    if (activeSession.status == SessionStatus.CONNECTED && activeSession.connectedAtMs != null) {
+                    if (activeSession.status.isLiveConnected && activeSession.connectedAtMs != null) {
                         TerminalUptimeText(
                             connectedAtMs = activeSession.connectedAtMs,
                             color = colors.lime
@@ -326,13 +361,21 @@ fun TerminalScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(
-                        onClick = {
-                            showDashboardSheet = true
-                            viewModel.loadServerMetrics(activeSession.sessionId)
-                        },
+                        onClick = { showDashboardSheet = true },
                         modifier = Modifier.testTag("terminal_dashboard_button")
                     ) {
                         Icon(Icons.Default.MonitorHeart, contentDescription = "ข้อมูลเซิร์ฟเวอร์ (Dashboard)", tint = colors.cyan)
+                    }
+                    IconButton(
+                        onClick = {
+                            showTmuxSheet = true
+                            if (appSettings.tmuxIntegrationEnabled) {
+                                viewModel.openTmuxSheet(activeSession.sessionId, activeSession.profile.id)
+                            }
+                        },
+                        modifier = Modifier.testTag("terminal_tmux_button")
+                    ) {
+                        Icon(Icons.Default.DynamicFeed, contentDescription = "Persistent Session (tmux)", tint = colors.lime)
                     }
                     IconButton(
                         onClick = { showSnippetsSheet = true },
@@ -364,7 +407,7 @@ fun TerminalScreen(
                     }) {
                         Icon(Icons.Default.ContentPaste, contentDescription = "วาง")
                     }
-                    if (activeSession.status == SessionStatus.CONNECTED) {
+                    if (activeSession.status.isLiveConnected) {
                         IconButton(
                             onClick = { viewModel.disconnect(activeSession.sessionId) },
                             modifier = Modifier.testTag("terminal_disconnect_button")
@@ -381,6 +424,7 @@ fun TerminalScreen(
                     }
                 }
 
+                val suggestedTmux = reconnectTmuxMap[activeSession.sessionId].orEmpty()
                 if (!activeSession.errorMessage.isNullOrBlank()) {
                     val actionLabel = when {
                         activeSession.showInstallTailscaleAction -> "Install Tailscale"
@@ -399,12 +443,28 @@ fun TerminalScreen(
                         onAction = onBannerAction,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                     )
+                } else if (!activeSession.keepAliveNotice.isNullOrBlank()) {
+                    ObsidianStatusBanner(
+                        message = activeSession.keepAliveNotice,
+                        tone = BannerTone.WARNING,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
                 } else if (!activeSession.networkWarning.isNullOrBlank()) {
                     ObsidianStatusBanner(
                         message = activeSession.networkWarning,
                         tone = BannerTone.WARNING,
                         actionLabel = "Reconnect",
                         onAction = { viewModel.reconnect(activeSession.sessionId) },
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                } else if (suggestedTmux.isNotEmpty() && activeSession.status.isLiveConnected) {
+                    val target = suggestedTmux.first()
+                    ObsidianStatusBanner(
+                        message = "พบ Persistent tmux session '${target.name}' บนเซิร์ฟเวอร์",
+                        tone = BannerTone.INFO,
+                        actionLabel = "Re-attach",
+                        onAction = { viewModel.attachOrCreateTmux(activeSession.sessionId, target.name) },
+                        onDismiss = { viewModel.dismissReconnectTmuxSuggestion(activeSession.sessionId) },
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                     )
                 } else if (!activeSession.tailscaleNotice.isNullOrBlank() && activeSession.status == SessionStatus.CONNECTING) {
@@ -683,11 +743,49 @@ fun TerminalScreen(
     }
 
     if (showDashboardSheet) {
+        LaunchedEffect(activeSession.sessionId, activeSession.status.isLiveConnected, dashboardInterval, appSettings.healthDashboardEnabled) {
+            if (appSettings.healthDashboardEnabled && activeSession.status.isLiveConnected) {
+                viewModel.startDashboardPolling(activeSession.sessionId, dashboardInterval)
+            } else {
+                viewModel.stopDashboardPolling()
+            }
+        }
+        DisposableEffect(Unit) {
+            onDispose { viewModel.stopDashboardPolling() }
+        }
         ServerDashboardSheet(
             session = activeSession,
-            metricsState = metricsState,
-            onRefresh = { viewModel.loadServerMetrics(activeSession.sessionId) },
-            onDismiss = { showDashboardSheet = false }
+            dashboardEnabled = appSettings.healthDashboardEnabled,
+            metricsState = activeMetricsState,
+            selectedInterval = dashboardInterval,
+            onSelectInterval = { interval ->
+                viewModel.setDashboardInterval(activeSession.sessionId, interval)
+            },
+            onRefresh = { viewModel.loadServerMetrics(activeSession.sessionId, forceSlow = true) },
+            onDismiss = {
+                viewModel.stopDashboardPolling()
+                showDashboardSheet = false
+            }
+        )
+    }
+
+    if (showTmuxSheet) {
+        TmuxBottomSheet(
+            session = activeSession,
+            tmuxEnabled = appSettings.tmuxIntegrationEnabled,
+            uiState = tmuxUiState,
+            onRefresh = { viewModel.refreshTmuxSessions(activeSession.sessionId, activeSession.profile.id) },
+            onCreateOrAttach = { customName ->
+                viewModel.attachOrCreateTmux(activeSession.sessionId, customName) {
+                    showTmuxSheet = false
+                }
+            },
+            onDetach = { viewModel.detachTmux(activeSession.sessionId) },
+            onKillSession = { name ->
+                viewModel.killTmuxSession(activeSession.sessionId, activeSession.profile.id, name)
+            },
+            onCopyCommand = { cmd -> copyToClipboard(context, cmd) },
+            onDismiss = { showTmuxSheet = false }
         )
     }
 }
@@ -893,11 +991,38 @@ private fun SnippetsBottomSheet(
     }
 }
 
+@Composable
+private fun MetricSparkline(
+    values: List<Float>,
+    lineColor: Color,
+    modifier: Modifier = Modifier
+) {
+    if (values.size < 2) return
+    Canvas(modifier = modifier.fillMaxWidth().height(28.dp)) {
+        val stepX = size.width / (values.size - 1).coerceAtLeast(1)
+        val path = Path()
+        values.forEachIndexed { idx, value ->
+            val x = idx * stepX
+            val normalizedY = (1f - (value.coerceIn(0f, 100f) / 100f))
+            val y = normalizedY * (size.height - 4f) + 2f
+            if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        drawPath(
+            path = path,
+            color = lineColor,
+            style = Stroke(width = 3f, cap = StrokeCap.Round)
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun ServerDashboardSheet(
     session: ManagedSessionUiState,
+    dashboardEnabled: Boolean,
     metricsState: MetricsLoadState,
+    selectedInterval: HealthRefreshInterval,
+    onSelectInterval: (HealthRefreshInterval) -> Unit,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -933,8 +1058,324 @@ private fun ServerDashboardSheet(
                         color = colors.cyan
                     )
                 }
-                IconButton(onClick = onRefresh) {
-                    Icon(Icons.Default.Refresh, contentDescription = "รีเฟรชค่าเซิร์ฟเวอร์", tint = colors.cyan)
+                if (dashboardEnabled && session.status.isLiveConnected) {
+                    IconButton(
+                        onClick = onRefresh,
+                        modifier = Modifier.testTag("dashboard_refresh_button")
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "รีเฟรชค่าเซิร์ฟเวอร์", tint = colors.cyan)
+                    }
+                }
+            }
+
+            if (!dashboardEnabled) {
+                ObsidianStatusBanner(
+                    message = "Server Health Dashboard ถูกปิดอยู่ในการตั้งค่า (Settings > Server Health Dashboard)",
+                    tone = BannerTone.INFO
+                )
+            } else if (!session.status.isLiveConnected) {
+                ObsidianStatusBanner(
+                    message = "ต้องเชื่อมต่อ SSH ก่อนจึงจะอ่านข้อมูลสุขภาพเซิร์ฟเวอร์ได้",
+                    tone = BannerTone.WARNING
+                )
+            } else {
+                // Interval selector
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    HealthRefreshInterval.entries.forEach { interval ->
+                        FilterChip(
+                            selected = selectedInterval == interval,
+                            onClick = { onSelectInterval(interval) },
+                            label = { Text(interval.label) },
+                            modifier = Modifier.testTag("dashboard_interval_${interval.name}")
+                        )
+                    }
+                }
+
+                when (metricsState) {
+                    is MetricsLoadState.Idle, MetricsLoadState.Loading -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(28.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                CircularProgressIndicator(color = colors.cyan)
+                                Text("กำลังอ่านข้อมูลสถิติจริงจากเซิร์ฟเวอร์...", style = MaterialTheme.typography.bodySmall, color = colors.textSecondary)
+                            }
+                        }
+                    }
+                    is MetricsLoadState.Unsupported -> {
+                        ObsidianStatusBanner(
+                            message = "${metricsState.reason} (${metricsState.detectedOs})",
+                            tone = BannerTone.WARNING
+                        )
+                    }
+                    is MetricsLoadState.Error -> {
+                        ObsidianStatusBanner(
+                            message = metricsState.message,
+                            tone = BannerTone.ERROR,
+                            actionLabel = "ลองใหม่",
+                            onAction = onRefresh
+                        )
+                    }
+                    is MetricsLoadState.Loaded -> {
+                        val m = metricsState.metrics
+                        val staleThresholdMs = if (selectedInterval.seconds > 0) {
+                            maxOf(selectedInterval.seconds * 2_500L, 65_000L)
+                        } else {
+                            65_000L
+                        }
+                        val isStale = metricsState.staleWarning != null || (nowMs - m.retrievedAt) > staleThresholdMs
+
+                        if (metricsState.isRefreshing) {
+                            LinearProgressIndicator(
+                                color = colors.cyan,
+                                trackColor = colors.border,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            ObsidianMetadataTag(
+                                text = m.dataSource.label,
+                                tint = if (m.dataSource == DashboardDataSource.FASTFETCH || m.dataSource == DashboardDataSource.MIXED) colors.lime else colors.cyan
+                            )
+                            ObsidianMetadataTag(
+                                text = if (metricsState.isRefreshing) "กำลังรีเฟรช..." else "อัปเดต ${Formatters.formatTimestamp(m.retrievedAt)}",
+                                tint = if (isStale) colors.amber else colors.textSecondary
+                            )
+                            if (isStale) {
+                                ObsidianMetadataTag(text = "Stale Data", icon = Icons.Default.Warning, tint = colors.amber)
+                            }
+                            session.latencyMs?.let { rtt ->
+                                ObsidianMetadataTag(text = "RTT $rtt ms", icon = Icons.Default.Speed, tint = colors.cyan, monospace = true)
+                            }
+                        }
+
+                        metricsState.staleWarning?.let { warn ->
+                            ObsidianStatusBanner(
+                                message = warn,
+                                tone = BannerTone.WARNING,
+                                actionLabel = "ลองใหม่",
+                                onAction = onRefresh
+                            )
+                        }
+
+                        if (!m.availabilityNote.isNullOrBlank()) {
+                            ObsidianStatusBanner(message = m.availabilityNote, tone = BannerTone.WARNING)
+                        }
+
+                        // System Identity
+                        ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md)) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("ระบบปฏิบัติการ & Uptime", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                                Text("Hostname: ${m.hostname ?: "Unavailable"}", style = MonoCodeStyle, color = colors.cyan)
+                                Text("OS: ${m.osInfo ?: "Unavailable"}", style = MaterialTheme.typography.bodySmall, color = colors.textPrimary)
+                                Text("Kernel: ${m.kernelInfo ?: "Unavailable"}", style = MonoCodeStyle, color = colors.textSecondary)
+                                Text("Uptime: ${m.uptimeText ?: "Unavailable"}", style = MaterialTheme.typography.bodySmall, color = colors.lime)
+                                Text("Load Avg: ${m.loadAverage ?: "Unavailable"}", style = MonoCodeStyle, color = colors.textSecondary)
+                            }
+                        }
+
+                        // CPU & Memory Grid
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                            ObsidianSurfaceCard(
+                                shape = RoundedCornerShape(ObsidianRadius.md),
+                                elevated = true,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("CPU Usage", style = MaterialTheme.typography.titleSmall, color = colors.textSecondary)
+                                    val cpuPct = if (m.cpuAvailability == MetricAvailability.AVAILABLE) m.cpuUsagePercent else null
+                                    val cpuColor = when {
+                                        cpuPct == null -> colors.textSecondary
+                                        cpuPct >= 90f -> colors.red
+                                        cpuPct >= 70f -> colors.amber
+                                        else -> colors.cyan
+                                    }
+                                    Text(
+                                        text = cpuPct?.let { "${"%.1f".format(it)}%" } ?: "Unavailable",
+                                        style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = cpuColor
+                                    )
+                                    if (!m.cpuModel.isNullOrBlank()) {
+                                        Text(
+                                            text = m.cpuModel,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = colors.textSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    cpuPct?.let { pct ->
+                                        LinearProgressIndicator(
+                                            progress = { (pct / 100f).coerceIn(0f, 1f) },
+                                            color = cpuColor,
+                                            trackColor = colors.border,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                    MetricSparkline(values = m.cpuHistory, lineColor = cpuColor)
+                                }
+                            }
+                            ObsidianSurfaceCard(
+                                shape = RoundedCornerShape(ObsidianRadius.md),
+                                elevated = true,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Default.Memory, null, tint = colors.lime, modifier = Modifier.size(14.dp))
+                                        Text("Memory", style = MaterialTheme.typography.titleSmall, color = colors.textSecondary)
+                                    }
+                                    val memAvail = m.memoryAvailability == MetricAvailability.AVAILABLE &&
+                                        m.memoryUsedMb != null && m.memoryTotalMb != null && m.memoryTotalMb > 0
+                                    val memRatio = if (memAvail) {
+                                        (m.memoryUsedMb!!.toFloat() / m.memoryTotalMb!!.toFloat()).coerceIn(0f, 1f)
+                                    } else null
+                                    val memColor = when {
+                                        memRatio == null -> colors.textSecondary
+                                        memRatio >= 0.90f -> colors.red
+                                        memRatio >= 0.70f -> colors.amber
+                                        else -> colors.lime
+                                    }
+                                    val memLabel = if (memAvail) "${m.memoryUsedMb}/${m.memoryTotalMb} MB" else "Unavailable"
+                                    Text(
+                                        text = memLabel,
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = memColor
+                                    )
+                                    if (memRatio != null) {
+                                        LinearProgressIndicator(
+                                            progress = { memRatio },
+                                            color = memColor,
+                                            trackColor = colors.border,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                    MetricSparkline(values = m.memoryHistory, lineColor = memColor)
+                                }
+                            }
+                        }
+
+                        // Network Throughput & Temperature Row
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                            ObsidianSurfaceCard(
+                                shape = RoundedCornerShape(ObsidianRadius.md),
+                                elevated = true,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Default.SwapVert, null, tint = colors.cyan, modifier = Modifier.size(14.dp))
+                                        Text("Net Throughput", style = MaterialTheme.typography.titleSmall, color = colors.textSecondary)
+                                    }
+                                    if (m.networkThroughputAvailability == MetricAvailability.AVAILABLE &&
+                                        m.networkRxBytesPerSec != null && m.networkTxBytesPerSec != null
+                                    ) {
+                                        Text(
+                                            text = "↓ ${Formatters.formatBytes(m.networkRxBytesPerSec)}/s",
+                                            style = MonoCodeStyle,
+                                            color = colors.lime
+                                        )
+                                        Text(
+                                            text = "↑ ${Formatters.formatBytes(m.networkTxBytesPerSec)}/s",
+                                            style = MonoCodeStyle,
+                                            color = colors.cyan
+                                        )
+                                    } else {
+                                        Text("Unavailable", style = MaterialTheme.typography.bodySmall, color = colors.textSecondary)
+                                    }
+                                }
+                            }
+                            ObsidianSurfaceCard(
+                                shape = RoundedCornerShape(ObsidianRadius.md),
+                                elevated = true,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Default.Thermostat, null, tint = colors.amber, modifier = Modifier.size(14.dp))
+                                        Text("Temperature", style = MaterialTheme.typography.titleSmall, color = colors.textSecondary)
+                                    }
+                                    when {
+                                        m.temperatureAvailability == MetricAvailability.AVAILABLE && m.temperatureCelsius != null -> {
+                                            val tempColor = when {
+                                                m.temperatureCelsius >= 80f -> colors.red
+                                                m.temperatureCelsius >= 65f -> colors.amber
+                                                else -> colors.lime
+                                            }
+                                            Text(
+                                                text = "${"%.1f".format(m.temperatureCelsius)}°C",
+                                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                                color = tempColor
+                                            )
+                                            m.temperatureSource?.let { src ->
+                                                Text(src, style = MaterialTheme.typography.labelSmall, color = colors.textSecondary)
+                                            }
+                                        }
+                                        m.temperatureAvailability == MetricAvailability.PERMISSION_DENIED -> {
+                                            Text("Permission denied", style = MaterialTheme.typography.bodySmall, color = colors.amber)
+                                        }
+                                        else -> {
+                                            Text("Unavailable", style = MaterialTheme.typography.bodySmall, color = colors.textSecondary)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (m.diskSummary.isNotEmpty()) {
+                            ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md)) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Icon(Icons.Default.Storage, null, tint = colors.cyan, modifier = Modifier.size(16.dp))
+                                        Text("พื้นที่ดิสก์ (Disk)", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                                    }
+                                    m.diskSummary.forEach { d ->
+                                        val diskColor = when {
+                                            d.usePercent >= 90 -> colors.red
+                                            d.usePercent >= 70 -> colors.amber
+                                            else -> colors.cyan
+                                        }
+                                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(d.mountPoint, style = MonoCodeStyle, color = colors.textPrimary)
+                                                Text("${d.usedText} / ${d.totalText} (${d.usePercent}%)", style = MaterialTheme.typography.labelSmall, color = diskColor)
+                                            }
+                                            LinearProgressIndicator(
+                                                progress = { (d.usePercent / 100f).coerceIn(0f, 1f) },
+                                                color = diskColor,
+                                                trackColor = colors.border,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (m.networkInterfaces.isNotEmpty()) {
+                            ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md)) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("อินเทอร์เฟซเครือข่าย", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                                    m.networkInterfaces.forEach { net ->
+                                        Text("${net.name}: ${net.addresses}", style = MonoCodeStyle, color = colors.cyan)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -961,168 +1402,216 @@ private fun ServerDashboardSheet(
                     }
                 }
             }
+            Spacer(modifier = Modifier.height(20.dp))
+        }
+    }
+}
 
-            when (metricsState) {
-                is MetricsLoadState.Idle, MetricsLoadState.Loading -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(28.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            CircularProgressIndicator(color = colors.cyan)
-                            Text("กำลังอ่านข้อมูลสถิติจริงจากเซิร์ฟเวอร์...", style = MaterialTheme.typography.bodySmall, color = colors.textSecondary)
-                        }
-                    }
-                }
-                is MetricsLoadState.Error -> {
-                    ObsidianStatusBanner(
-                        message = metricsState.message,
-                        tone = BannerTone.ERROR,
-                        actionLabel = "ลองใหม่",
-                        onAction = onRefresh
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun TmuxBottomSheet(
+    session: ManagedSessionUiState,
+    tmuxEnabled: Boolean,
+    uiState: TmuxSheetUiState,
+    onRefresh: () -> Unit,
+    onCreateOrAttach: (String?) -> Unit,
+    onDetach: () -> Unit,
+    onKillSession: (String) -> Unit,
+    onCopyCommand: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = LocalObsidianColors.current
+    var customNameInput by remember { mutableStateOf("") }
+    var sessionToConfirmKill by remember { mutableStateOf<RemoteTmuxSession?>(null) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = colors.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Persistent Session (tmux)", style = MaterialTheme.typography.titleLarge, color = colors.textPrimary)
+                    Text(
+                        text = "รักษางานบนเซิร์ฟเวอร์เมื่อปิดหน้าจอหรือเครือข่ายหลุด (Opt-in)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.textSecondary
                     )
                 }
-                is MetricsLoadState.Loaded -> {
-                    val m = metricsState.metrics
-                    val isStale = (nowMs - m.retrievedAt) > 60_000L
+                if (tmuxEnabled && session.status.isLiveConnected) {
+                    IconButton(onClick = onRefresh, modifier = Modifier.testTag("tmux_refresh_button")) {
+                        Icon(Icons.Default.Refresh, contentDescription = "รีเฟรช tmux sessions", tint = colors.cyan)
+                    }
+                }
+            }
 
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        ObsidianMetadataTag(
-                            text = "อัปเดตเมื่อ ${Formatters.formatTimestamp(m.retrievedAt)}",
-                            tint = if (isStale) colors.amber else colors.textSecondary
+            if (!tmuxEnabled) {
+                ObsidianStatusBanner(
+                    message = "tmux Integration ถูกปิดอยู่ในการตั้งค่า (Settings > Persistent Sessions)",
+                    tone = BannerTone.INFO
+                )
+            } else if (!session.status.isLiveConnected) {
+                ObsidianStatusBanner(
+                    message = "กรุณาเชื่อมต่อ SSH ก่อนจึงจะจัดการ tmux sessions บนเซิร์ฟเวอร์ได้",
+                    tone = BannerTone.WARNING
+                )
+            } else {
+                uiState.feedbackMessage?.let { msg ->
+                    ObsidianStatusBanner(message = msg, tone = BannerTone.INFO)
+                }
+                uiState.errorMessage?.let { err ->
+                    ObsidianStatusBanner(message = err, tone = BannerTone.ERROR)
+                }
+
+                when (val check = uiState.checkResult) {
+                    null -> {
+                        Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = colors.cyan)
+                        }
+                    }
+                    is TmuxCheckResult.Error -> {
+                        ObsidianStatusBanner(
+                            message = check.message,
+                            tone = BannerTone.ERROR,
+                            actionLabel = "ลองใหม่",
+                            onAction = onRefresh
                         )
-                        if (isStale) {
-                            ObsidianMetadataTag(text = "ข้อมูลเก่ากว่า 1 นาที", icon = Icons.Default.Warning, tint = colors.amber)
-                        }
-                        session.latencyMs?.let { rtt ->
-                            ObsidianMetadataTag(text = "RTT $rtt ms", icon = Icons.Default.Speed, tint = colors.cyan, monospace = true)
-                        }
                     }
-
-                    if (!m.availabilityNote.isNullOrBlank()) {
-                        ObsidianStatusBanner(message = m.availabilityNote, tone = BannerTone.WARNING)
-                    }
-
-                    ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md)) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("ระบบปฏิบัติการ & Uptime", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
-                            Text("Hostname: ${m.hostname ?: "ไม่พร้อมใช้งาน"}", style = MonoCodeStyle, color = colors.cyan)
-                            Text("OS: ${m.osInfo ?: "ไม่พร้อมใช้งาน"}", style = MaterialTheme.typography.bodySmall, color = colors.textPrimary)
-                            Text("Kernel: ${m.kernelInfo ?: "ไม่พร้อมใช้งาน"}", style = MonoCodeStyle, color = colors.textSecondary)
-                            Text("Uptime: ${m.uptimeText ?: "ไม่พร้อมใช้งาน"}", style = MaterialTheme.typography.bodySmall, color = colors.lime)
-                            Text("Load Avg: ${m.loadAverage ?: "ไม่พร้อมใช้งาน"}", style = MonoCodeStyle, color = colors.textSecondary)
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                        ObsidianSurfaceCard(
-                            shape = RoundedCornerShape(ObsidianRadius.md),
-                            elevated = true,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("CPU Usage", style = MaterialTheme.typography.titleSmall, color = colors.textSecondary)
-                                val cpuPct = m.cpuUsagePercent
-                                val cpuColor = when {
-                                    cpuPct == null -> colors.textSecondary
-                                    cpuPct >= 90f -> colors.red
-                                    cpuPct >= 70f -> colors.amber
-                                    else -> colors.cyan
-                                }
-                                Text(
-                                    text = cpuPct?.let { "${"%.1f".format(it)}%" } ?: "N/A",
-                                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = cpuColor
-                                )
-                                cpuPct?.let { pct ->
-                                    LinearProgressIndicator(
-                                        progress = { (pct / 100f).coerceIn(0f, 1f) },
-                                        color = cpuColor,
-                                        trackColor = colors.border,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                            }
-                        }
-                        ObsidianSurfaceCard(
-                            shape = RoundedCornerShape(ObsidianRadius.md),
-                            elevated = true,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Icon(Icons.Default.Memory, null, tint = colors.lime, modifier = Modifier.size(14.dp))
-                                    Text("Memory", style = MaterialTheme.typography.titleSmall, color = colors.textSecondary)
-                                }
-                                val memRatio = if (m.memoryUsedMb != null && m.memoryTotalMb != null && m.memoryTotalMb > 0) {
-                                    (m.memoryUsedMb.toFloat() / m.memoryTotalMb).coerceIn(0f, 1f)
-                                } else null
-                                val memColor = when {
-                                    memRatio == null -> colors.textSecondary
-                                    memRatio >= 0.90f -> colors.red
-                                    memRatio >= 0.70f -> colors.amber
-                                    else -> colors.lime
-                                }
-                                val memLabel = if (m.memoryUsedMb != null && m.memoryTotalMb != null) {
-                                    "${m.memoryUsedMb}/${m.memoryTotalMb} MB"
-                                } else "N/A"
-                                Text(text = memLabel, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = memColor)
-                                if (memRatio != null) {
-                                    LinearProgressIndicator(
-                                        progress = { memRatio },
-                                        color = memColor,
-                                        trackColor = colors.border,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    if (m.diskSummary.isNotEmpty()) {
-                        ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md)) {
+                    is TmuxCheckResult.NotInstalled -> {
+                        ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md), elevated = true) {
                             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Icon(Icons.Default.Storage, null, tint = colors.cyan, modifier = Modifier.size(16.dp))
-                                    Text("พื้นที่ดิสก์ (Disk)", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
-                                }
-                                m.diskSummary.forEach { d ->
-                                    val diskColor = when {
-                                        d.usePercent >= 90 -> colors.red
-                                        d.usePercent >= 70 -> colors.amber
-                                        else -> colors.cyan
-                                    }
-                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            Text(d.mountPoint, style = MonoCodeStyle, color = colors.textPrimary)
-                                            Text("${d.usedText} / ${d.totalText} (${d.usePercent}%)", style = MaterialTheme.typography.labelSmall, color = diskColor)
-                                        }
-                                        LinearProgressIndicator(
-                                            progress = { (d.usePercent / 100f).coerceIn(0f, 1f) },
-                                            color = diskColor,
-                                            trackColor = colors.border,
-                                            modifier = Modifier.fillMaxWidth()
+                                Text(
+                                    text = "ไม่พบ tmux บนเซิร์ฟเวอร์ (${check.detectedOs})",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = colors.amber
+                                )
+                                Text(
+                                    text = "TrueSeekrSSH จะไม่ติดตั้งแพ็กเกจให้โดยอัตโนมัติ คุณสามารถติดตั้งด้วยคำสั่งด้านล่าง:",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.textSecondary
+                                )
+                                check.installInstructions.forEach { cmdLine ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = cmdLine,
+                                            style = MonoCodeStyle,
+                                            color = colors.cyan,
+                                            modifier = Modifier.weight(1f)
                                         )
+                                        IconButton(onClick = { onCopyCommand(cmdLine.substringAfter(": ").trim()) }) {
+                                            Icon(Icons.Default.ContentCopy, contentDescription = "คัดลอกคำสั่งติดตั้ง", tint = colors.textSecondary)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    is TmuxCheckResult.Available -> {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ObsidianMetadataTag(text = check.versionText, tint = colors.lime)
+                            ObsidianMetadataTag(text = "${uiState.remoteSessions.size} remote", tint = colors.cyan)
+                        }
 
-                    if (m.networkInterfaces.isNotEmpty()) {
-                        ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md)) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("อินเทอร์เฟซเครือข่าย", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
-                                m.networkInterfaces.forEach { net ->
-                                    Text("${net.name}: ${net.addresses}", style = MonoCodeStyle, color = colors.cyan)
+                        // Create / Attach controls
+                        ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md), elevated = true) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = customNameInput,
+                                    onValueChange = { customNameInput = it },
+                                    label = { Text("ชื่อ Session (เว้นว่างเพื่อใช้ชื่อปลอดภัยอัตโนมัติ)") },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(ObsidianRadius.md),
+                                    modifier = Modifier.fillMaxWidth().testTag("tmux_custom_name_input")
+                                )
+                                if (customNameInput.isNotBlank()) {
+                                    val previewSanitized = TmuxManager.sanitizeSessionNameInput(customNameInput)
+                                    Text(
+                                        text = "ชื่อที่จะใช้จริง: $previewSanitized",
+                                        style = MonoCodeStyle,
+                                        color = colors.cyan
+                                    )
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    Button(
+                                        onClick = { onCreateOrAttach(customNameInput.takeIf { it.isNotBlank() }) },
+                                        enabled = !uiState.isActionRunning,
+                                        modifier = Modifier.weight(1f).height(48.dp).testTag("tmux_create_attach_button")
+                                    ) {
+                                        Icon(Icons.Default.PlayArrow, null)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("เริ่ม / เชื่อมต่อ")
+                                    }
+                                    OutlinedButton(
+                                        onClick = onDetach,
+                                        enabled = !uiState.isActionRunning,
+                                        modifier = Modifier.height(48.dp).testTag("tmux_detach_button")
+                                    ) {
+                                        Text("Detach")
+                                    }
+                                }
+                            }
+                        }
+
+                        // Remote Sessions List
+                        Text(
+                            text = "Remote tmux Sessions",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = colors.textPrimary
+                        )
+                        if (uiState.remoteSessions.isEmpty()) {
+                            Text(
+                                text = "ยังไม่มี tmux session ที่รันอยู่บนเซิร์ฟเวอร์",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textSecondary
+                            )
+                        } else {
+                            uiState.remoteSessions.forEach { remote ->
+                                ObsidianSurfaceCard(shape = RoundedCornerShape(ObsidianRadius.md), elevated = true) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text(remote.name, style = MonoCodeStyle.copy(fontWeight = FontWeight.SemiBold), color = colors.textPrimary)
+                                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                ObsidianMetadataTag(
+                                                    text = if (remote.isManagedByApp) "TrueSeekrSSH" else "External",
+                                                    tint = if (remote.isManagedByApp) colors.lime else colors.amber
+                                                )
+                                                ObsidianMetadataTag(
+                                                    text = "${remote.windowsCount} win • ${if (remote.isAttached) "attached" else "detached"}",
+                                                    tint = colors.textSecondary
+                                                )
+                                            }
+                                        }
+                                        Button(
+                                            onClick = { onCreateOrAttach(remote.name) },
+                                            modifier = Modifier.height(44.dp)
+                                        ) {
+                                            Text("Attach")
+                                        }
+                                        IconButton(
+                                            onClick = { sessionToConfirmKill = remote },
+                                            modifier = Modifier.testTag("tmux_kill_${remote.name}")
+                                        ) {
+                                            Icon(Icons.Default.Delete, contentDescription = "Kill session", tint = colors.red)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1131,6 +1620,42 @@ private fun ServerDashboardSheet(
             }
             Spacer(modifier = Modifier.height(20.dp))
         }
+    }
+
+    sessionToConfirmKill?.let { target ->
+        AlertDialog(
+            onDismissRequest = { sessionToConfirmKill = null },
+            containerColor = colors.surface,
+            icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = colors.amber) },
+            title = { Text("ยืนยันการปิด tmux Session") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("คุณต้องการส่งคำสั่งปิด '${target.name}' ถาวรหรือไม่? โปรแกรมที่รันอยู่ใน session นี้จะถูกหยุดทันที")
+                    if (!target.isManagedByApp) {
+                        Text(
+                            text = "คำเตือน: session นี้ไม่ได้สร้างโดย TrueSeekrSSH (External Session)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.amber
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onKillSession(target.name)
+                        sessionToConfirmKill = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.red),
+                    modifier = Modifier.testTag("confirm_kill_tmux_button")
+                ) {
+                    Text("ยืนยันปิด Session")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { sessionToConfirmKill = null }) { Text("ยกเลิก") }
+            }
+        )
     }
 }
 

@@ -1,5 +1,13 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -38,6 +46,7 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
+import androidx.core.content.ContextCompat
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -75,6 +84,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.example.domain.AppAccentPreset
 import com.example.domain.AppThemeMode
+import com.example.domain.HealthRefreshInterval
 import com.example.domain.TerminalCursorStyle
 import com.example.domain.TerminalFontFamily
 import com.example.domain.TerminalThemePreset
@@ -111,6 +121,17 @@ fun SettingsScreen(
     var showPinSetupDialog by remember { mutableStateOf(false) }
     var showLicensesDialog by remember { mutableStateOf(false) }
     var showSecurityArchDialog by remember { mutableStateOf(false) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.setBackgroundKeepAliveEnabled(true)
+        } else {
+            viewModel.setBackgroundKeepAliveEnabled(false)
+            viewModel.postFeedback("กรุณาอนุญาตการแจ้งเตือน (Notification) เพื่อแสดงแถบสถานะ Background Keep Alive บน Android 13+")
+        }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.refreshVaultCount()
@@ -571,9 +592,146 @@ fun SettingsScreen(
                             checked = settings.autoReconnectPrompt,
                             onCheckedChange = { viewModel.setAutoReconnectPrompt(it) }
                         )
+                    }
+                }
+            }
 
-                        HorizontalDivider(color = colors.subtleBorder)
+            item {
+                ObsidianSurfaceCard {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("SSH Keepalive & Background Session", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                        SettingsSwitchRow(
+                            title = "เปิดใช้งาน SSH Keepalive Pings",
+                            subtitle = "ส่ง SSH keepalive ping เป็นระยะเพื่อป้องกัน NAT/Firewall ตัดเซสชันและตรวจจับ Connection Lost",
+                            checked = settings.sshKeepAliveEnabled,
+                            onCheckedChange = { viewModel.setSshKeepAliveEnabled(it) },
+                            switchModifier = Modifier.testTag("settings_ssh_keepalive_switch")
+                        )
+                        Text("รอบส่ง Keepalive (Global Default)", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(15, 30, 60, 120).forEach { sec ->
+                                FilterChip(
+                                    selected = settings.sshKeepAliveIntervalSec == sec,
+                                    enabled = settings.sshKeepAliveEnabled,
+                                    onClick = { viewModel.setSshKeepAliveIntervalSec(sec) },
+                                    label = { Text("${sec}s") }
+                                )
+                            }
+                        }
+                        Text("จำนวนครั้งที่พลาดก่อนแจ้ง Connection Lost", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(2, 3, 5).forEach { maxMissed ->
+                                FilterChip(
+                                    selected = settings.sshKeepAliveMaxMissed == maxMissed,
+                                    enabled = settings.sshKeepAliveEnabled,
+                                    onClick = { viewModel.setSshKeepAliveMaxMissed(maxMissed) },
+                                    label = { Text("${maxMissed} ครั้ง") }
+                                )
+                            }
+                        }
+                        SettingsSwitchRow(
+                            title = "คงเซสชันในเบื้องหลัง (Foreground Service)",
+                            subtitle = "แสดง Notification ถาวรพร้อมปุ่มหยุดเชื่อมต่ออย่างปลอดภัย (หยุดอัตโนมัติเมื่อปิดทุกแท็บ)",
+                            checked = settings.backgroundKeepAliveEnabled,
+                            onCheckedChange = { enable ->
+                                if (!enable) {
+                                    viewModel.setBackgroundKeepAliveEnabled(false)
+                                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                    ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.POST_NOTIFICATIONS
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                } else {
+                                    viewModel.setBackgroundKeepAliveEnabled(true)
+                                }
+                            },
+                            switchModifier = Modifier.testTag("settings_background_keepalive_switch")
+                        )
+                        SettingsSwitchRow(
+                            title = "ป้องกัน CPU หลับขณะเชื่อมต่อ (PARTIAL_WAKE_LOCK)",
+                            subtitle = "ใช้พลังงานแบตเตอรี่เพิ่มขึ้น; ปล่อยล็อกทันทีเมื่อตัดการเชื่อมต่อหรือปิดสวิตช์",
+                            checked = settings.keepCpuAwakeWhileConnected,
+                            enabled = settings.backgroundKeepAliveEnabled,
+                            onCheckedChange = { viewModel.setKeepCpuAwakeWhileConnected(it) },
+                            switchModifier = Modifier.testTag("settings_keep_cpu_awake_switch")
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                val fallback = Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.fromParts("package", context.packageName, null)
+                                )
+                                runCatching { context.startActivity(intent) }
+                                    .onFailure { runCatching { context.startActivity(fallback) } }
+                            },
+                            modifier = Modifier.height(48.dp)
+                        ) {
+                            Text("ตั้งค่า Battery Optimization (ลดการถูกระบบปิดเบื้องหลัง)")
+                        }
+                    }
+                }
+            }
 
+            item {
+                ObsidianSurfaceCard {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("Server Health Dashboard & tmux", style = MaterialTheme.typography.titleMedium, color = colors.textPrimary)
+                        SettingsSwitchRow(
+                            title = "เปิดใช้งาน Server Health Dashboard",
+                            subtitle = "ใช้ Fastfetch JSON (--format json) หากมีบน Linux หรืออ่านค่าจาก /proc, /sys และ df แบบ Read-Only",
+                            checked = settings.healthDashboardEnabled,
+                            onCheckedChange = { viewModel.setHealthDashboardEnabled(it) },
+                            switchModifier = Modifier.testTag("settings_health_dashboard_switch")
+                        )
+                        Text("รอบอัปเดต Dashboard อัตโนมัติ", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            HealthRefreshInterval.entries.forEach { interval ->
+                                FilterChip(
+                                    selected = settings.healthRefreshInterval == interval,
+                                    enabled = settings.healthDashboardEnabled,
+                                    onClick = { viewModel.setHealthRefreshInterval(interval) },
+                                    label = { Text(interval.label) },
+                                    modifier = Modifier.testTag("settings_health_interval_${interval.name}")
+                                )
+                            }
+                        }
+                        SettingsSwitchRow(
+                            title = "เปิดใช้งาน Persistent Sessions (tmux)",
+                            subtitle = "จัดการ tmux session บนเซิร์ฟเวอร์แบบ opt-in (ไม่ติดตั้งแพ็กเกจอัตโนมัติ)",
+                            checked = settings.tmuxIntegrationEnabled,
+                            onCheckedChange = { viewModel.setTmuxIntegrationEnabled(it) },
+                            switchModifier = Modifier.testTag("settings_tmux_switch")
+                        )
+                        Text("คำนำหน้าชื่อ tmux session ของแอป", style = MaterialTheme.typography.titleSmall, color = colors.textPrimary)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("trueSeekr", "ssh", "tssh").forEach { prefix ->
+                                FilterChip(
+                                    selected = settings.tmuxSessionPrefix == prefix,
+                                    enabled = settings.tmuxIntegrationEnabled,
+                                    onClick = { viewModel.setTmuxSessionPrefix(prefix) },
+                                    label = { Text(prefix) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                ObsidianSurfaceCard {
+                    Column(
+                        modifier = Modifier.padding(ObsidianSpacing.lg),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)

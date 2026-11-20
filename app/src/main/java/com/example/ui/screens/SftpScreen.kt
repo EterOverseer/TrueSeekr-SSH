@@ -107,7 +107,7 @@ fun SftpScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     val connectedSessions = remember(sessions) {
-        sessions.filter { it.status == SessionStatus.CONNECTED }
+        sessions.filter { it.status.isLiveConnected }
     }
 
     var isGridView by rememberSaveable { mutableStateOf(false) }

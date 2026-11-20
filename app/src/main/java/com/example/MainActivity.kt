@@ -191,7 +191,8 @@ private fun PocketSshRoot(
     val terminalViewModel: TerminalViewModel = viewModel(
         factory = TerminalViewModel.Factory(
             container.sshSessionManager,
-            container.snippetRepository
+            container.snippetRepository,
+            container.preferencesRepository
         )
     )
     val sftpViewModel: SftpViewModel = viewModel(
@@ -216,7 +217,7 @@ private fun PocketSshRoot(
     val vaultCount by settingsViewModel.vaultCount.collectAsStateWithLifecycle()
 
     val connectedCount = remember(sessions) {
-        sessions.count { it.status == SessionStatus.CONNECTED }
+        sessions.count { it.status.isLiveConnected }
     }
 
     val navController = rememberNavController()

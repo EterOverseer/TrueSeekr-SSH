@@ -8,6 +8,7 @@ import androidx.room.PrimaryKey
 import com.example.domain.AuthMethodType
 import com.example.domain.CommandSnippet
 import com.example.domain.KnownHost
+import com.example.domain.ManagedTmuxSession
 import com.example.domain.ProfileGroup
 import com.example.domain.RecentConnection
 import com.example.domain.SshProfile
@@ -187,6 +188,41 @@ data class CommandSnippetEntity(
             description = snippet.description.trim(),
             requiresConfirmation = snippet.requiresConfirmation,
             createdAt = snippet.createdAt
+        )
+    }
+}
+
+@Entity(
+    tableName = "tmux_sessions",
+    foreignKeys = [
+        ForeignKey(
+            entity = SshProfileEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["profileId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index(value = ["profileId"])]
+)
+data class TmuxSessionEntity(
+    @PrimaryKey val sessionName: String,
+    val profileId: String,
+    val createdAt: Long,
+    val lastAttachedAt: Long
+) {
+    fun toDomain(): ManagedTmuxSession = ManagedTmuxSession(
+        sessionName = sessionName,
+        profileId = profileId,
+        createdAt = createdAt,
+        lastAttachedAt = lastAttachedAt
+    )
+
+    companion object {
+        fun fromDomain(session: ManagedTmuxSession): TmuxSessionEntity = TmuxSessionEntity(
+            sessionName = session.sessionName,
+            profileId = session.profileId,
+            createdAt = session.createdAt,
+            lastAttachedAt = session.lastAttachedAt
         )
     }
 }

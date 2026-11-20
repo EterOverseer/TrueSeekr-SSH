@@ -150,9 +150,15 @@ enum class SessionStatus(val label: String) {
     VERIFYING_HOST("ตรวจสอบ Host Key"),
     AUTHENTICATING("กำลังยืนยันตัวตน"),
     CONNECTED("เชื่อมต่อแล้ว"),
+    CONNECTION_IDLE("เชื่อมต่อแล้ว (Idle)"),
+    CHECKING_CONNECTION("กำลังตรวจสอบการเชื่อมต่อ"),
     RECONNECTING("กำลังเชื่อมต่อใหม่"),
     DISCONNECTED("ตัดการเชื่อมต่อแล้ว"),
-    ERROR("เชื่อมต่อล้มเหลว")
+    CONNECTION_LOST("การเชื่อมต่อขาดหาย"),
+    ERROR("เชื่อมต่อล้มเหลว");
+
+    val isLiveConnected: Boolean
+        get() = this == CONNECTED || this == CONNECTION_IDLE || this == CHECKING_CONNECTION
 }
 
 data class SessionConnectionMeta(
@@ -220,19 +226,58 @@ data class SftpTransferState(
     val errorMessage: String? = null
 )
 
+enum class HealthRefreshInterval(val seconds: Int, val label: String) {
+    FIVE_SECONDS(5, "5s"),
+    TEN_SECONDS(10, "10s"),
+    THIRTY_SECONDS(30, "30s"),
+    SIXTY_SECONDS(60, "60s"),
+    MANUAL(0, "Manual")
+}
+
+enum class MetricAvailability {
+    AVAILABLE,
+    UNSUPPORTED,
+    UNAVAILABLE,
+    PERMISSION_DENIED,
+    CONNECTION_ERROR
+}
+
+enum class DashboardDataSource(val label: String) {
+    FASTFETCH("Fastfetch JSON"),
+    LINUX_PROC("Linux /proc"),
+    MIXED("Fastfetch + /proc"),
+    UNSUPPORTED("Unsupported OS")
+}
+
 data class ServerMetrics(
     val retrievedAt: Long = System.currentTimeMillis(),
+    val dataSource: DashboardDataSource = DashboardDataSource.LINUX_PROC,
+    val isLinux: Boolean = true,
+    val detectedOsKernelName: String? = null,
+    val fastfetchAvailable: Boolean = false,
     val osInfo: String? = null,
     val kernelInfo: String? = null,
     val hostname: String? = null,
     val uptimeText: String? = null,
     val loadAverage: String? = null,
+    val cpuModel: String? = null,
     val cpuUsagePercent: Float? = null,
+    val cpuAvailability: MetricAvailability = MetricAvailability.UNAVAILABLE,
     val memoryUsedMb: Long? = null,
     val memoryTotalMb: Long? = null,
+    val memoryAvailability: MetricAvailability = MetricAvailability.UNAVAILABLE,
+    val temperatureCelsius: Float? = null,
+    val temperatureSource: String? = null,
+    val temperatureAvailability: MetricAvailability = MetricAvailability.UNAVAILABLE,
+    val networkRxBytesPerSec: Long? = null,
+    val networkTxBytesPerSec: Long? = null,
+    val networkThroughputAvailability: MetricAvailability = MetricAvailability.UNAVAILABLE,
     val diskSummary: List<DiskMountInfo> = emptyList(),
+    val diskAvailability: MetricAvailability = MetricAvailability.UNAVAILABLE,
     val networkInterfaces: List<NetworkInterfaceInfo> = emptyList(),
-    val availabilityNote: String? = null
+    val availabilityNote: String? = null,
+    val cpuHistory: List<Float> = emptyList(),
+    val memoryHistory: List<Float> = emptyList()
 )
 
 data class DiskMountInfo(
@@ -247,3 +292,26 @@ data class NetworkInterfaceInfo(
     val name: String,
     val addresses: String
 )
+
+data class ManagedTmuxSession(
+    val sessionName: String,
+    val profileId: String,
+    val createdAt: Long = System.currentTimeMillis(),
+    val lastAttachedAt: Long = System.currentTimeMillis()
+)
+
+data class RemoteTmuxSession(
+    val name: String,
+    val windowsCount: Int = 1,
+    val isAttached: Boolean = false,
+    val createdEpochSec: Long? = null,
+    val activityEpochSec: Long? = null,
+    val isManagedByApp: Boolean = false,
+    val associatedProfileId: String? = null
+)
+
+sealed interface TmuxCheckResult {
+    data class Available(val versionText: String) : TmuxCheckResult
+    data class NotInstalled(val detectedOs: String, val installInstructions: List<String>) : TmuxCheckResult
+    data class Error(val message: String) : TmuxCheckResult
+}

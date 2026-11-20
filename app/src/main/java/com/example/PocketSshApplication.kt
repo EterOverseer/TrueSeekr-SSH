@@ -6,6 +6,7 @@ import com.example.data.KnownHostRepository
 import com.example.data.PocketSshDatabase
 import com.example.data.ProfileRepository
 import com.example.data.SnippetRepository
+import com.example.data.TmuxSessionRepository
 import com.example.network.AndroidTailscaleIntentController
 import com.example.network.AndroidTailscaleVpnMonitor
 import com.example.network.SocketServerReachabilityChecker
@@ -15,6 +16,7 @@ import com.example.network.TailscaleSessionLeaseManager
 import com.example.security.AndroidKeystoreCryptoEngine
 import com.example.security.CredentialVault
 import com.example.settings.AppPreferencesRepository
+import com.example.ssh.AndroidKeepAliveServiceBridge
 import com.example.ssh.SshSessionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,11 +52,14 @@ class AppContainer(application: Application) {
         profileDao = database.profileDao(),
         groupDao = database.profileGroupDao(),
         recentDao = database.recentConnectionDao(),
-        credentialVault = credentialVault
+        credentialVault = credentialVault,
+        database = database
     )
 
     val knownHostRepository = KnownHostRepository(database.knownHostDao())
     val snippetRepository = SnippetRepository(database.commandSnippetDao())
+    val tmuxSessionRepository = TmuxSessionRepository(database.tmuxSessionDao())
+    val keepAliveServiceBridge = AndroidKeepAliveServiceBridge(application)
 
     val sshSessionManager = SshSessionManager(
         profileRepository = profileRepository,
@@ -62,7 +67,9 @@ class AppContainer(application: Application) {
         credentialVault = credentialVault,
         networkMonitor = networkMonitor,
         preferencesRepository = preferencesRepository,
-        tailscaleCoordinator = tailscaleCoordinator
+        tailscaleCoordinator = tailscaleCoordinator,
+        tmuxSessionRepository = tmuxSessionRepository,
+        keepAliveServiceBridge = keepAliveServiceBridge
     )
 
     init {

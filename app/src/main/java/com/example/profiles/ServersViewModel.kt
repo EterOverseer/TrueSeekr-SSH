@@ -17,6 +17,10 @@ import com.example.domain.TerminalThemePreset
 import com.example.security.BackupCryptoManager
 import com.example.security.BackupImportResult
 import com.example.security.CredentialVault
+import com.example.security.ExportBackupPreview
+import com.example.security.ImportDuplicateStrategy
+import com.example.security.ImportPreviewSummary
+import com.example.security.ProfileBackupBundle
 import com.example.settings.AppPreferencesRepository
 import com.example.settings.AppSettings
 import com.example.ssh.ManagedSessionUiState
@@ -79,6 +83,11 @@ data class ServersUiState(
     val messageBanner: String? = null
 )
 
+data class PendingImportReview(
+    val rawBundle: ProfileBackupBundle,
+    val preview: ImportPreviewSummary
+)
+
 class ServersViewModel(
     private val profileRepository: ProfileRepository,
     private val credentialVault: CredentialVault,
@@ -95,6 +104,9 @@ class ServersViewModel(
 
     private val _editorDraft = MutableStateFlow<ProfileEditorDraft?>(null)
     val editorDraft: StateFlow<ProfileEditorDraft?> = _editorDraft.asStateFlow()
+
+    private val _pendingImportReview = MutableStateFlow<PendingImportReview?>(null)
+    val pendingImportReview: StateFlow<PendingImportReview?> = _pendingImportReview.asStateFlow()
 
     val tailscaleAutomationEnabled: StateFlow<Boolean> = preferencesRepository.settings
         .combine(MutableStateFlow(Unit)) { settings, _ -> settings.tailscaleAutomationEnabled }
@@ -453,6 +465,10 @@ class ServersViewModel(
         }
     }
 
+    fun getExportPreview(): ExportBackupPreview {
+        return BackupCryptoManager.buildExportPreview(uiState.value.allProfiles, credentialVault)
+    }
+
     fun buildExportContent(encryptWithPassphrase: String?): Result<String> {
         val profiles = uiState.value.allProfiles
         val groups = uiState.value.groups.filter { !it.isBuiltIn }.map { it.name }
@@ -460,26 +476,103 @@ class ServersViewModel(
             if (encryptWithPassphrase.isNullOrBlank()) {
                 BackupCryptoManager.exportMetadataJson(profiles, groups)
             } else {
-                BackupCryptoManager.exportEncryptedBackup(profiles, groups, encryptWithPassphrase.toCharArray())
+                val pass = encryptWithPassphrase.toCharArray()
+                try {
+                    BackupCryptoManager.exportEncryptedBackup(profiles, groups, pass)
+                } finally {
+                    pass.fill('\u0000')
+                }
+            }
+        }
+    }
+
+    fun buildEncryptedFullBackup(passphrase: String, includeCredentials: Boolean): Result<String> {
+        val profiles = uiState.value.allProfiles
+        val groups = uiState.value.groups.filter { !it.isBuiltIn }.map { it.name }
+        val passChars = passphrase.toCharArray()
+        return try {
+            runCatching {
+                BackupCryptoManager.exportEncryptedFullBackup(
+                    profiles = profiles,
+                    groups = groups,
+                    passphrase = passChars,
+                    credentialVault = credentialVault,
+                    includeCredentials = includeCredentials
+                )
+            }
+        } finally {
+            passChars.fill('\u0000')
+        }
+    }
+
+    fun prepareImportPreview(rawText: String, passphrase: String?): BackupImportResult {
+        val passChars = passphrase?.toCharArray()
+        return try {
+            val result = BackupCryptoManager.importBackup(rawText, passChars)
+            if (result is BackupImportResult.Success) {
+                val preview = BackupCryptoManager.analyzeImportPreview(
+                    bundle = result.bundle,
+                    existingProfiles = uiState.value.allProfiles,
+                    isEncrypted = BackupCryptoManager.isEncryptedBackup(rawText)
+                )
+                _pendingImportReview.value = PendingImportReview(
+                    rawBundle = result.bundle,
+                    preview = preview
+                )
+            }
+            result
+        } finally {
+            passChars?.fill('\u0000')
+        }
+    }
+
+    fun dismissImportPreview() {
+        _pendingImportReview.value = null
+    }
+
+    fun confirmImportWithStrategy(strategy: ImportDuplicateStrategy, onDone: (String) -> Unit) {
+        val review = _pendingImportReview.value ?: return
+        viewModelScope.launch {
+            try {
+                val summary = profileRepository.importWithStrategy(review.rawBundle, strategy)
+                _pendingImportReview.value = null
+                val parts = buildList {
+                    if (summary.importedNewCount > 0) add("ใหม่ ${summary.importedNewCount}")
+                    if (summary.replacedCount > 0) add("เขียนทับ ${summary.replacedCount}")
+                    if (summary.keptBothCount > 0) add("เก็บคู่ ${summary.keptBothCount}")
+                    if (summary.skippedDuplicateCount > 0) add("ข้ามซ้ำ ${summary.skippedDuplicateCount}")
+                    if (summary.reEncryptedCredentialsCount > 0) add("กู้คืน Credential ${summary.reEncryptedCredentialsCount}")
+                }
+                val detail = if (parts.isEmpty()) "ไม่มีรายการเปลี่ยนแปลง" else parts.joinToString(" • ")
+                val msg = "นำเข้าสำเร็จ: $detail (Host Key ยังต้องยืนยัน TOFU ด้วยตนเอง)"
+                messageBanner.value = msg
+                onDone(msg)
+            } catch (t: Throwable) {
+                onDone("นำเข้าล้มเหลวและยกเลิกการเปลี่ยนแปลงทั้งหมด: ${t.message ?: "Unknown error"}")
             }
         }
     }
 
     fun importBackupContent(rawText: String, passphrase: String?, onDone: (String) -> Unit) {
         viewModelScope.launch {
-            when (val result = BackupCryptoManager.importBackup(rawText, passphrase?.toCharArray())) {
-                is BackupImportResult.Success -> {
-                    val count = profileRepository.importProfilesSafely(
-                        importedProfiles = result.bundle.profiles,
-                        importedGroups = result.bundle.groups
-                    )
-                    val msg = "นำเข้า $count โปรไฟล์สำเร็จ (ไม่เขียนทับของเดิม และไม่เชื่อถือ Host Key อัตโนมัติ)"
-                    messageBanner.value = msg
-                    onDone(msg)
+            val passChars = passphrase?.toCharArray()
+            try {
+                when (val result = BackupCryptoManager.importBackup(rawText, passChars)) {
+                    is BackupImportResult.Success -> {
+                        val count = profileRepository.importProfilesSafely(
+                            importedProfiles = result.bundle.profiles,
+                            importedGroups = result.bundle.groups
+                        )
+                        val msg = "นำเข้า $count โปรไฟล์สำเร็จ (ไม่เขียนทับของเดิม และไม่เชื่อถือ Host Key อัตโนมัติ)"
+                        messageBanner.value = msg
+                        onDone(msg)
+                    }
+                    is BackupImportResult.Error -> {
+                        onDone(result.message)
+                    }
                 }
-                is BackupImportResult.Error -> {
-                    onDone(result.message)
-                }
+            } finally {
+                passChars?.fill('\u0000')
             }
         }
     }

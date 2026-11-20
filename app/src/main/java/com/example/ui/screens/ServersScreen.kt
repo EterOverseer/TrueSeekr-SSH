@@ -17,13 +17,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.Sort
@@ -73,12 +77,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -94,6 +100,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.core.Formatters
 import com.example.domain.AuthMethodType
 import com.example.domain.ProfileGroup
@@ -103,6 +111,10 @@ import com.example.domain.SshProfile
 import com.example.profiles.ServersUiState
 import com.example.profiles.ServersViewModel
 import com.example.security.BackupCryptoManager
+import com.example.security.BackupImportResult
+import com.example.security.ExportBackupPreview
+import com.example.security.ImportDuplicateStrategy
+import com.example.security.ImportPreviewSummary
 import com.example.ssh.ManagedSessionUiState
 import com.example.ui.components.BannerTone
 import com.example.ui.components.ConnectionStatusPill
@@ -143,8 +155,11 @@ fun ServersScreen(
     var pendingExportPayload by remember { mutableStateOf<String?>(null) }
     var importedRawText by remember { mutableStateOf<String?>(null) }
 
+    val pendingImportReview by viewModel.pendingImportReview.collectAsState()
+    var importParseError by remember { mutableStateOf<String?>(null) }
+
     val exportSafLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/json")
+        contract = ActivityResultContracts.CreateDocument("*/*")
     ) { uri: Uri? ->
         val payload = pendingExportPayload
         pendingExportPayload = null
@@ -161,21 +176,46 @@ fun ServersScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
+            importParseError = null
             runCatching {
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    input.bufferedReader(Charsets.UTF_8).readText()
+                val stream = context.contentResolver.openInputStream(uri)
+                val raw = stream?.use { input ->
+                    val bytes = input.readBytes()
+                    if (bytes.size > BackupCryptoManager.MAX_BACKUP_BYTES) {
+                        error("ไฟล์สำรองมีขนาดใหญ่เกิน 10 MB")
+                    }
+                    String(bytes, Charsets.UTF_8)
                 }
-            }.getOrNull()?.let { text ->
-                importedRawText = text
+                raw
+            }.onSuccess { text ->
+                if (!text.isNullOrBlank()) {
+                    if (BackupCryptoManager.isEncryptedBackup(text)) {
+                        importedRawText = text
+                    } else {
+                        val res = viewModel.prepareImportPreview(text, null)
+                        if (res is BackupImportResult.Error) {
+                            importParseError = res.message
+                        }
+                    }
+                } else {
+                    importParseError = "ไฟล์สำรองข้อมูลว่างเปล่าหรือไม่สามารถอ่านได้"
+                }
+            }.onFailure { err ->
+                importParseError = err.message ?: "ไม่สามารถเปิดไฟล์สำรองข้อมูลได้"
             }
         }
     }
 
     val connectedCount = remember(uiState.activeSessions) {
-        uiState.activeSessions.count { it.status == SessionStatus.CONNECTED }
+        uiState.activeSessions.count { it.status.isLiveConnected }
     }
     val attentionCount = remember(uiState.activeSessions) {
-        uiState.activeSessions.count { it.status == SessionStatus.ERROR || !it.networkWarning.isNullOrBlank() }
+        uiState.activeSessions.count {
+            it.status == SessionStatus.ERROR ||
+                it.status == SessionStatus.CONNECTION_LOST ||
+                it.status == SessionStatus.CHECKING_CONNECTION ||
+                !it.networkWarning.isNullOrBlank()
+        }
     }
 
     Scaffold(
@@ -721,18 +761,20 @@ fun ServersScreen(
     }
 
     if (showBackupDialog) {
+        val exportPreview = remember(uiState.allProfiles) { viewModel.getExportPreview() }
         BackupExportImportDialog(
+            exportPreview = exportPreview,
             onExportMetadata = {
                 viewModel.buildExportContent(null).onSuccess { jsonText ->
                     pendingExportPayload = jsonText
-                    exportSafLauncher.launch("pocketssh-profiles-metadata.json")
+                    exportSafLauncher.launch(BackupCryptoManager.STANDARD_EXPORT_FILENAME)
                     showBackupDialog = false
                 }
             },
-            onExportEncrypted = { pass ->
-                viewModel.buildExportContent(pass).onSuccess { encryptedText ->
+            onExportEncrypted = { pass, includeCreds ->
+                viewModel.buildEncryptedFullBackup(pass, includeCreds).onSuccess { encryptedText ->
                     pendingExportPayload = encryptedText
-                    exportSafLauncher.launch("pocketssh-backup.pocketssh")
+                    exportSafLauncher.launch(BackupCryptoManager.ENCRYPTED_BACKUP_FILENAME)
                     showBackupDialog = false
                 }
             },
@@ -745,54 +787,76 @@ fun ServersScreen(
     }
 
     importedRawText?.let { raw ->
-        val isEncrypted = BackupCryptoManager.isEncryptedBackup(raw)
-        var passphrase by remember { mutableStateOf("") }
-        var feedback by remember { mutableStateOf<String?>(null) }
+        var passphrase by remember(raw) { mutableStateOf("") }
+        var feedback by remember(raw) { mutableStateOf<String?>(null) }
 
         AlertDialog(
             onDismissRequest = { importedRawText = null },
             containerColor = colors.surface,
-            title = { Text("นำเข้าโปรไฟล์ SSH") },
+            title = { Text("ถอดรหัสไฟล์สำรองข้อมูล") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = if (isEncrypted) {
-                            "ไฟล์นี้เข้ารหัสด้วย AES-256-GCM กรุณากรอก Passphrase เพื่อถอดรหัส:"
-                        } else {
-                            "พบไฟล์ Metadata โปรไฟล์ JSON (ระบบจะไม่เขียนทับโปรไฟล์เดิม และจะไม่เชื่อถือ Host Key อัตโนมัติ)"
-                        },
+                        text = "ไฟล์นี้เข้ารหัสด้วย AES-256-GCM + PBKDF2 กรุณากรอกรหัสผ่านสำรองข้อมูลเพื่อดูตัวอย่างก่อนนำเข้า:",
                         style = MaterialTheme.typography.bodyMedium
                     )
-                    if (isEncrypted) {
-                        OutlinedTextField(
-                            value = passphrase,
-                            onValueChange = { passphrase = it },
-                            label = { Text("Passphrase") },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
+                    OutlinedTextField(
+                        value = passphrase,
+                        onValueChange = {
+                            passphrase = it
+                            feedback = null
+                        },
+                        label = { Text("รหัสผ่านสำรองข้อมูล") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().testTag("backup_decrypt_passphrase_input")
+                    )
                     if (!feedback.isNullOrBlank()) {
                         Text(feedback!!, color = colors.red, style = MaterialTheme.typography.bodySmall)
                     }
                 }
             },
             confirmButton = {
-                Button(onClick = {
-                    viewModel.importBackupContent(raw, passphrase.takeIf { isEncrypted }) { msg ->
-                        if (msg.contains("สำเร็จ")) {
-                            importedRawText = null
-                        } else {
-                            feedback = msg
+                Button(
+                    onClick = {
+                        when (val res = viewModel.prepareImportPreview(raw, passphrase)) {
+                            is BackupImportResult.Success -> importedRawText = null
+                            is BackupImportResult.Error -> feedback = res.message
                         }
-                    }
-                }) {
-                    Text("นำเข้า")
+                    },
+                    enabled = passphrase.isNotEmpty()
+                ) {
+                    Text("ถอดรหัสและตรวจสอบ")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { importedRawText = null }) { Text("ยกเลิก") }
+            }
+        )
+    }
+
+    pendingImportReview?.let { review ->
+        ImportPreviewDialog(
+            preview = review.preview,
+            onDismiss = { viewModel.dismissImportPreview() },
+            onConfirmImport = { strategy, onError ->
+                viewModel.confirmImportWithStrategy(strategy) { msg ->
+                    if (!msg.contains("สำเร็จ")) {
+                        onError(msg)
+                    }
+                }
+            }
+        )
+    }
+
+    importParseError?.let { errorMsg ->
+        AlertDialog(
+            onDismissRequest = { importParseError = null },
+            containerColor = colors.surface,
+            title = { Text("ไม่สามารถอ่านไฟล์สำรองข้อมูล") },
+            text = { Text(errorMsg, color = colors.red) },
+            confirmButton = {
+                TextButton(onClick = { importParseError = null }) { Text("ตกลง") }
             }
         )
     }
@@ -943,7 +1007,7 @@ private fun ActiveSessionCard(
     onReconnect: () -> Unit
 ) {
     val colors = LocalObsidianColors.current
-    val isConnected = session.status == SessionStatus.CONNECTED
+    val isConnected = session.status.isLiveConnected
     var nowMs by remember(isConnected, session.connectedAtMs) {
         mutableLongStateOf(System.currentTimeMillis())
     }
@@ -954,8 +1018,9 @@ private fun ActiveSessionCard(
         }
     }
     val accent = when {
-        isConnected -> colors.lime.copy(alpha = 0.45f)
-        session.status == SessionStatus.ERROR -> colors.red.copy(alpha = 0.45f)
+        session.status == SessionStatus.CONNECTED || session.status == SessionStatus.CONNECTION_IDLE -> colors.lime.copy(alpha = 0.45f)
+        session.status == SessionStatus.CHECKING_CONNECTION -> colors.amber.copy(alpha = 0.45f)
+        session.status == SessionStatus.ERROR || session.status == SessionStatus.CONNECTION_LOST -> colors.red.copy(alpha = 0.45f)
         else -> colors.cyan.copy(alpha = 0.35f)
     }
 
@@ -1036,7 +1101,10 @@ private fun ActiveSessionCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (session.status == SessionStatus.DISCONNECTED || session.status == SessionStatus.ERROR) {
+                if (session.status == SessionStatus.DISCONNECTED ||
+                    session.status == SessionStatus.CONNECTION_LOST ||
+                    session.status == SessionStatus.ERROR
+                ) {
                     OutlinedButton(
                         onClick = onReconnect,
                         shape = RoundedCornerShape(ObsidianRadius.md),
@@ -1140,7 +1208,7 @@ private fun ProfileCard(
     onOpenDetails: () -> Unit
 ) {
     val colors = LocalObsidianColors.current
-    val accentBorder = if (sessionStatus == SessionStatus.CONNECTED) colors.lime.copy(alpha = 0.45f) else null
+    val accentBorder = if (sessionStatus?.isLiveConnected == true) colors.lime.copy(alpha = 0.45f) else null
 
     ObsidianSurfaceCard(
         elevated = true,
@@ -1367,56 +1435,289 @@ private fun GroupManagerDialog(
 
 @Composable
 private fun BackupExportImportDialog(
+    exportPreview: ExportBackupPreview,
     onExportMetadata: () -> Unit,
-    onExportEncrypted: (String) -> Unit,
+    onExportEncrypted: (String, Boolean) -> Unit,
     onChooseImportFile: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val colors = LocalObsidianColors.current
     var passphrase by remember { mutableStateOf("") }
+    var includeCredentials by remember { mutableStateOf(false) }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        containerColor = colors.surface,
-        title = { Text("สำรองและกู้คืนโปรไฟล์") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            color = colors.surface,
+            shape = RoundedCornerShape(ObsidianRadius.xl),
+            border = BorderStroke(1.dp, colors.border),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 24.dp)
+                .widthIn(max = 520.dp)
+                .heightIn(max = 640.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Text(
-                    text = "ค่าเริ่มต้นจะส่งออกเฉพาะ Metadata ของโปรไฟล์เท่านั้น ไม่รวมรหัสผ่าน, Private Key หรือ Host Trust เพื่อความปลอดภัยสูงสุด",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.textSecondary
+                    text = "สำรองและกู้คืนโปรไฟล์",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = colors.textPrimary
                 )
-                OutlinedButton(
-                    onClick = onExportMetadata,
-                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("ส่งออก Metadata (JSON)")
+                    Surface(
+                        color = colors.elevated,
+                        shape = RoundedCornerShape(ObsidianRadius.md),
+                        border = BorderStroke(1.dp, colors.subtleBorder),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Export Preview (${exportPreview.totalProfiles} โปรไฟล์)",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = colors.textPrimary
+                            )
+                            Text(
+                                text = "• มี Credential ใน Vault: ${exportPreview.storedCredentialCount} • ไม่มีใน Vault: ${exportPreview.missingStoredCredentialCount}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textSecondary
+                            )
+                            Text(
+                                text = "• Android Keystore keys และ Known Host Trust จะไม่ถูกส่งออก",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.amber
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = onExportMetadata,
+                        enabled = exportPreview.totalProfiles > 0,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("export_standard_json_button")
+                    ) {
+                        Text("ส่งออก Standard JSON (Metadata เท่านั้น)")
+                    }
+
+                    HorizontalDivider(color = colors.subtleBorder)
+
+                    Text(
+                        text = "Encrypted Full Backup (.tsshbackup)",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = colors.cyan
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { includeCredentials = !includeCredentials }
+                    ) {
+                        Checkbox(
+                            checked = includeCredentials,
+                            onCheckedChange = { includeCredentials = it },
+                            modifier = Modifier.testTag("export_include_credentials_checkbox")
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "รวมรหัสผ่านและ Private Key จาก Vault",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = colors.textPrimary
+                            )
+                            Text(
+                                text = "เข้ารหัส AES-256-GCM + PBKDF2 (210,000 รอบ) และเข้ารหัสซ้ำด้วย Keystore ของเครื่องปลายทางเมื่อนำเข้า",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.textSecondary
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = passphrase,
+                        onValueChange = { passphrase = it },
+                        label = { Text("รหัสผ่านสำรองข้อมูล (อย่างน้อย 6 ตัว)") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("export_passphrase_input")
+                    )
+                    Button(
+                        onClick = { onExportEncrypted(passphrase, includeCredentials) },
+                        enabled = exportPreview.totalProfiles > 0 && passphrase.length >= 6,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("export_encrypted_backup_button")
+                    ) {
+                        Text(
+                            if (includeCredentials) "ส่งออก Encrypted Full Backup" else "ส่งออก Encrypted Metadata Backup"
+                        )
+                    }
+
+                    HorizontalDivider(color = colors.subtleBorder)
+
+                    OutlinedButton(
+                        onClick = onChooseImportFile,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("choose_import_file_button")
+                    ) {
+                        Text("นำเข้าไฟล์สำรอง (.json / .tsshbackup / .pocketssh)")
+                    }
                 }
-                OutlinedTextField(
-                    value = passphrase,
-                    onValueChange = { passphrase = it },
-                    label = { Text("Passphrase สำหรับไฟล์สำรองเข้ารหัส (อย่างน้อย 6 ตัว)") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Button(
-                    onClick = { onExportEncrypted(passphrase) },
-                    enabled = passphrase.length >= 6,
-                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
                 ) {
-                    Text("ส่งออกแบบเข้ารหัส AES-256-GCM")
-                }
-                OutlinedButton(
-                    onClick = onChooseImportFile,
-                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                ) {
-                    Text("นำเข้าไฟล์สำรอง (.json / .pocketssh)")
+                    TextButton(onClick = onDismiss) { Text("ปิด") }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("ปิด") }
         }
-    )
+    }
+}
+
+@Composable
+private fun ImportPreviewDialog(
+    preview: ImportPreviewSummary,
+    onDismiss: () -> Unit,
+    onConfirmImport: (ImportDuplicateStrategy, onError: (String) -> Unit) -> Unit
+) {
+    val colors = LocalObsidianColors.current
+    var selectedStrategy by remember { mutableStateOf(ImportDuplicateStrategy.SKIP) }
+    var applyError by remember { mutableStateOf<String?>(null) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            color = colors.surface,
+            shape = RoundedCornerShape(ObsidianRadius.xl),
+            border = BorderStroke(1.dp, colors.border),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 24.dp)
+                .widthIn(max = 520.dp)
+                .heightIn(max = 640.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "ตรวจสอบก่อนนำเข้า (Import Preview)",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = colors.textPrimary
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Surface(
+                        color = colors.elevated,
+                        shape = RoundedCornerShape(ObsidianRadius.md),
+                        border = BorderStroke(1.dp, colors.subtleBorder),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = if (preview.isEncrypted) {
+                                    "ประเภท: Encrypted Backup (v${preview.formatVersion})"
+                                } else {
+                                    "ประเภท: Standard JSON Metadata (v${preview.formatVersion})"
+                                },
+                                style = MaterialTheme.typography.titleSmall,
+                                color = colors.cyan
+                            )
+                            Text(
+                                text = "ทั้งหมด: ${preview.totalCount} • โปรไฟล์ใหม่: ${preview.newCount} • ซ้ำกับที่มีอยู่: ${preview.duplicateCount}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                text = "Credential ที่มากับไฟล์: ${preview.embeddedCredentialCount} • ยังไม่มีรหัส/Key (ต้องกรอกภายหลัง): ${preview.missingAuthCount}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (preview.missingAuthCount > 0) colors.amber else colors.lime
+                            )
+                            if (preview.invalidOrUnsupportedCount > 0) {
+                                Text(
+                                    text = "รายการไม่สมบูรณ์/ไม่รองรับ (จะถูกข้าม): ${preview.invalidOrUnsupportedCount}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.red
+                                )
+                            }
+                        }
+                    }
+
+                    if (preview.duplicateCount > 0) {
+                        Text(
+                            text = "วิธีจัดการโปรไฟล์ที่ซ้ำกัน:",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = colors.textPrimary
+                        )
+                        ImportDuplicateStrategy.entries.forEach { strategy ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedStrategy = strategy }
+                                    .testTag("import_strategy_${strategy.name}")
+                            ) {
+                                RadioButton(
+                                    selected = selectedStrategy == strategy,
+                                    onClick = { selectedStrategy = strategy }
+                                )
+                                Text(
+                                    text = strategy.label,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = colors.textPrimary
+                                )
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = "เพื่อความปลอดภัย Host Key จะไม่ถูกเชื่อถืออัตโนมัติ (TOFU จะถามยืนยันเมื่อเชื่อมต่อครั้งแรก)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.textSecondary
+                    )
+
+                    if (!applyError.isNullOrBlank()) {
+                        Text(applyError!!, color = colors.red, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                ) {
+                    TextButton(onClick = onDismiss) { Text("ยกเลิก") }
+                    Button(
+                        onClick = { onConfirmImport(selectedStrategy) { err -> applyError = err } },
+                        enabled = preview.newCount > 0 || (preview.duplicateCount > 0 && selectedStrategy != ImportDuplicateStrategy.SKIP),
+                        modifier = Modifier.testTag("confirm_import_button")
+                    ) {
+                        Text("ยืนยันนำเข้า")
+                    }
+                }
+            }
+        }
+    }
 }

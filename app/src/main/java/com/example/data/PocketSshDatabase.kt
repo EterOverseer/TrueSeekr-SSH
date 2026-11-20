@@ -13,9 +13,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProfileGroupEntity::class,
         RecentConnectionEntity::class,
         KnownHostEntity::class,
-        CommandSnippetEntity::class
+        CommandSnippetEntity::class,
+        TmuxSessionEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class PocketSshDatabase : RoomDatabase() {
@@ -24,6 +25,7 @@ abstract class PocketSshDatabase : RoomDatabase() {
     abstract fun recentConnectionDao(): RecentConnectionDao
     abstract fun knownHostDao(): KnownHostDao
     abstract fun commandSnippetDao(): CommandSnippetDao
+    abstract fun tmuxSessionDao(): TmuxSessionDao
 
     companion object {
         val BUILT_IN_GROUPS = listOf(
@@ -46,13 +48,38 @@ abstract class PocketSshDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Non-destructive migration adding TrueSeekrSSH-managed remote tmux session metadata.
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `tmux_sessions` (
+                        `sessionName` TEXT NOT NULL,
+                        `profileId` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `lastAttachedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`sessionName`),
+                        FOREIGN KEY(`profileId`) REFERENCES `ssh_profiles`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_tmux_sessions_profileId` ON `tmux_sessions` (`profileId`)"
+                )
+            }
+        }
+
+        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
+
         fun create(context: Context): PocketSshDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 PocketSshDatabase::class.java,
                 "pocketssh.db"
             )
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(*ALL_MIGRATIONS)
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)
