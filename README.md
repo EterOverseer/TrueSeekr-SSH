@@ -1,190 +1,243 @@
+# TrueSeekrSSH
+
 <p align="center">
-  <img src="app/src/main/res/drawable/pocketssh_icon_1795059769535.jpg" alt="PocketSSH logo" width="140" />
+  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="TrueSeekrSSH app icon" width="128" />
 </p>
 
-<h1 align="center">PocketSSH</h1>
+<h1 align="center">TrueSeekrSSH</h1>
 
 <p align="center">
-  <b>A secure, native Android SSH client</b><br/>
-  Persistent profiles · real interactive terminal · SFTP file manager · Keystore-protected credentials
-</p>
-
-<p align="center">
-  <img alt="Android 7.0+" src="https://img.shields.io/badge/Android-7.0%2B-24D8E7?style=for-the-badge&logo=android&logoColor=white&labelColor=151A20" />
-  <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.4-B6F36A?style=for-the-badge&logo=kotlin&logoColor=white&labelColor=151A20" />
-  <img alt="Jetpack Compose" src="https://img.shields.io/badge/Jetpack%20Compose-Material%203-24D8E7?style=for-the-badge&logo=jetpackcompose&logoColor=white&labelColor=151A20" />
-  <img alt="Security first" src="https://img.shields.io/badge/Security-first-B6F36A?style=for-the-badge&logo=letsencrypt&logoColor=white&labelColor=151A20" />
+  <strong>A native Android SSH client for managing remote servers.</strong><br />
+  Saved server profiles · Interactive terminal · SFTP file manager · Encrypted credentials
 </p>
 
 <p align="center">
-  <a href="#-features">Features</a> ·
-  <a href="#-security">Security</a> ·
-  <a href="#-getting-started">Getting started</a> ·
-  <a href="#-project-structure">Structure</a> ·
-  <a href="#-documentation">Docs</a>
+  <img alt="Android 7.0+" src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white" />
+  <img alt="Kotlin 2.4.21" src="https://img.shields.io/badge/Kotlin-2.4.21-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white" />
+  <img alt="Jetpack Compose" src="https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white" />
+  <img alt="Security focused" src="https://img.shields.io/badge/Security-focused-16A085?style=for-the-badge&logo=letsencrypt&logoColor=white" />
 </p>
 
-<!-- TODO: add screenshots here, e.g. a row of 3-4 images (servers list, terminal, SFTP, settings) -->
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#security">Security</a> ·
+  <a href="#download">Download</a> ·
+  <a href="#build-from-source">Build from source</a> ·
+  <a href="#technology-stack">Technology stack</a> ·
+  <a href="#documentation">Documentation</a>
+</p>
 
 ---
 
-## ✨ Features
+## Overview
 
-### 🖥️ Server profiles
-- Save SSH profiles with **groups**, **favorites**, **recent connections** and a live view of **active sessions**
-- Three authentication methods: **password**, **private key**, and **private key + passphrase**
-- Search and sort by name, last connected, host / IP, or most used
-- Export and import profile metadata as JSON, optionally **encrypted with a passphrase**. Credentials are never included in exports
+TrueSeekrSSH is a native Android application for connecting to SSH servers, working in a real terminal, and managing remote files over SFTP. It keeps server profiles organized, protects saved credentials with Android Keystore-backed encryption, and provides a configurable interface for mobile use.
 
-### ⌨️ Real interactive terminal
-- Jetpack Compose terminal powered by ConnectBot's `termlib` (native `libvterm` core)
-- **Multiple session tabs**, in-terminal **search**, a function-key bar and an extra key toolbar
-- Saved **command snippets** in a quick-access sheet, with a confirmation step before anything is sent to the server
-- Five terminal themes: *Obsidian Aurora*, *Charcoal Lime*, *Teal Matrix*, *Solarized Dark*, *High Contrast*
-- Configurable font (JetBrains Mono or system monospace), font size, cursor style (block / underline / bar), scrollback, haptic key feedback, keep-alive, connection timeout and reconnect prompt
+The app is built with Kotlin and Jetpack Compose. Its interface includes Thai and English labels.
 
-### 📊 Server dashboard
-Peek at a connected server without leaving the app: OS and kernel, hostname, uptime, load average, CPU, memory, disk mounts and network interfaces (whatever the server exposes).
+## Features
 
-### 📁 SFTP file manager
-- Browse remote files in **list or grid** view
-- Create folders, rename and delete
-- Upload and download through the Android file picker (Storage Access Framework), so no broad storage permission is needed
+### Server profiles
+- Save and organize SSH connections with groups and favorites.
+- Quickly revisit recent connections and see active sessions.
+- Authenticate with a password, a private key, or a private key with a passphrase.
+- Search and sort profiles by name, host/IP, last connection, or usage.
+- Import and export profile metadata as JSON. Exports can be encrypted with a passphrase; credentials are not included.
 
-### 🎨 Look and feel
-- Dark (*Obsidian*), Light, or follow the system theme
-- Four accent presets: *Cyan Aurora*, *Electric Lime*, *Ice Signal*, *Cyber Violet*
-- Bundled **JetBrains Mono**, **Space Grotesk** and **Noto Sans Thai**, with UI labels in both Thai and English
+### Interactive terminal
+- Native terminal interface powered by ConnectBot's terminal library.
+- Multiple terminal session tabs.
+- Search within terminal output.
+- Function-key row and additional terminal key toolbar.
+- Saved command snippets with a confirmation step before sending commands.
+- Five terminal themes: Obsidian Aurora, Charcoal Lime, Teal Matrix, Solarized Dark, and High Contrast.
+- Configurable font, font size, cursor style, scrollback, haptic feedback, keep-alive, connection timeout, and reconnect prompt.
 
----
+### Server dashboard
+View information reported by the connected server without leaving the app:
+- Operating system, kernel, and hostname
+- Uptime and load average
+- CPU and memory information
+- Disk mounts and network interfaces
 
-## 🔐 Security
+The exact information available depends on the remote server and its installed utilities.
 
-PocketSSH is built around "never trust, never store plaintext":
+### SFTP file manager
+- Browse remote directories in list or grid layout.
+- Create directories, rename files, and delete remote items.
+- Upload and download files using the Android document picker.
+- Uses Android's Storage Access Framework rather than requesting broad storage access.
 
-| Area | How it works |
+### Personalization
+- Dark, light, or system theme.
+- Four accent presets: Cyan Aurora, Electric Lime, Ice Signal, and Cyber Violet.
+- JetBrains Mono, Space Grotesk, and Noto Sans Thai bundled with the app.
+- UI labels available in Thai and English.
+
+## Security
+
+Security-sensitive data is handled locally and protected by Android platform features.
+
+| Area | Implementation |
 |---|---|
-| **Credentials** | Passwords and private keys are encrypted with **AES-256-GCM** using an **Android Keystore** master key, stored in app-private no-backup storage |
-| **Host keys** | Unknown hosts pause the connection and show the SHA-256 fingerprint for explicit approval. A **changed key is rejected** and the user is warned about a possible MITM |
-| **App lock** | Biometric prompt plus PIN (PBKDF2-HMAC-SHA256) with configurable auto-lock |
-| **Passphrases** | Kept only in memory and cleared on lock and disconnect |
-| **Transport** | Modern key exchange, host key and cipher policy with no silent downgrade to legacy algorithms |
-| **Backups** | `allowBackup="false"`, with data-extraction rules excluding app data |
-| **Screen privacy** | Optional `FLAG_SECURE` to block screenshots and the recents preview |
-| **Logs** | Passwords, passphrases and PEM blocks are redacted from error text |
+| Saved credentials | Passwords and private keys are encrypted with AES-256-GCM using a master key held by Android Keystore. |
+| Local storage | Encrypted credentials are stored in app-private, no-backup storage. |
+| SSH host verification | New hosts require explicit fingerprint approval. A changed host key is rejected and reported to the user. |
+| App lock | Optional biometric authentication and PIN-based app lock with configurable auto-lock. |
+| Key passphrases | Kept in memory and cleared during lock and disconnect flows. |
+| SSH transport | Modern key exchange, host-key, and cipher policies; no silent downgrade to legacy algorithms. |
+| Backups | Android backup is disabled and extraction rules exclude app data. |
+| Screen privacy | Optional secure-screen setting to block screenshots and the recent-app preview. |
+| Diagnostic output | Passwords, passphrases, and private-key PEM blocks are redacted from displayed error text. |
 
-Permissions requested: `INTERNET`, `ACCESS_NETWORK_STATE`, `USE_BIOMETRIC`. Nothing else.
+### Android permissions
 
-Full details: [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md)
+The application requests only:
+- `INTERNET`
+- `ACCESS_NETWORK_STATE`
+- `USE_BIOMETRIC`
 
----
+See the [Security Architecture](docs/SECURITY_ARCHITECTURE.md) document for implementation details.
 
-## 🧰 Tech stack
+## Download
 
-| Layer | Choice |
-|---|---|
-| Language / UI | Kotlin, Jetpack Compose, Material 3, Navigation Compose |
-| SSH / SFTP | [ConnectBot `sshlib`](https://github.com/connectbot/cbssh) (pure-Kotlin SSHv2 over coroutines) |
-| Terminal | [ConnectBot `termlib`](https://github.com/connectbot/termlib) |
-| Storage | Room (profiles, groups, known hosts, snippets), DataStore (settings) |
-| Security | Android Keystore, AndroidX Biometric |
-| Async / serialization | Kotlin Coroutines and Flow, kotlinx.serialization |
-| Build | Gradle (Kotlin DSL), KSP, version catalog in `gradle/libs.versions.toml` |
-| Tests | JUnit 4, Robolectric, Compose UI tests |
+The latest automated debug build is published on the GitHub Releases page.
 
-Dependency versions and licenses: [`docs/DEPENDENCIES_AND_LICENSES.md`](docs/DEPENDENCIES_AND_LICENSES.md)
+**[Download the latest TrueSeekrSSH APK](https://github.com/EterOverseer/TrueSeekr-SSH/releases/tag/latest-build)**
 
----
+To download an APK produced by a build on another branch, open that run in **Actions** and download the `app-debug` artifact.
 
-## 🚀 Getting started
+> **Important — debug build signing:** GitHub Actions generates a temporary debug keystore for each run. APKs from different workflow runs therefore have different signatures. Uninstall the previously installed CI build before installing a new CI build. These debug APKs are intended for testing, not as a stable upgrade channel.
+
+## Build from source
 
 ### Requirements
 
-- JDK 17 or newer
-- Android SDK Platform **36.1** (`compileSdk 36.1`, `minSdk 24`, `targetSdk 36`)
-- Gradle **9.3.1** (this repo does not ship a Gradle wrapper; run `gradle wrapper --gradle-version 9.3.1` once if you want one)
+- JDK 17
+- Android SDK Platform 36.1
+- Gradle 9.3.1
+- Android SDK configured for your environment
 
-### Build a debug APK
+The repository includes Gradle wrapper configuration but does not currently include the `gradlew` launcher scripts. Use an installed Gradle 9.3.1 executable, or generate wrapper scripts locally if preferred.
+
+### Clone the repository
 
 ```bash
 git clone https://github.com/EterOverseer/TrueSeekr-SSH.git
 cd TrueSeekr-SSH
-
-# The debug signing config expects debug.keystore at the repo root.
-# The file is git-ignored, so create it once:
-keytool -genkeypair -keystore debug.keystore \
-  -storepass android -alias androiddebugkey -keypass android \
-  -keyalg RSA -keysize 2048 -validity 10000 \
-  -dname "CN=Android Debug,O=Android,C=US"
-
-gradle :app:assembleDebug
-# → app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Or just open the project in **Android Studio** and press **Run**, after creating `debug.keystore` as above.
+### Create the local debug keystore
 
-### Run the checks
+The debug signing configuration expects `debug.keystore` in the repository root. This file is ignored by Git.
 
 ```bash
-gradle :app:testDebugUnitTest   # unit + Robolectric tests
-gradle :app:lintDebug           # Android Lint
+keytool -genkeypair -v -keystore debug.keystore \
+  -storepass android \
+  -alias androiddebugkey \
+  -keypass android \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000 \
+  -dname "CN=Android Debug,O=Android,C=US"
+```
+
+### Build a debug APK
+
+```bash
+gradle :app:assembleDebug
+```
+
+APK output:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Run tests and Android Lint
+
+```bash
+gradle :app:testDebugUnitTest
+gradle :app:lintDebug
 ```
 
 ### Build with GitHub Actions
 
-`.github/workflows/build-apk.yml` builds a debug APK on every push and creates the debug keystore for you.
+The workflow is defined in [`.github/workflows/build-apk.yml`](.github/workflows/build-apk.yml).
 
-- **Releases page:** every push to `main` refreshes the `latest-build` pre-release with the newest `PocketSSH-debug.apk`. Pushing a tag such as `v1.0.0` publishes a regular release with that name.
-- **Actions artifacts:** any run (including branches) also attaches the APK as the **`app-debug`** artifact, under the run's **Actions** tab.
+- Every push and manual workflow run builds a debug APK.
+- Every run uploads an `app-debug` artifact, including runs from feature branches.
+- A push to `main` refreshes the rolling `latest-build` pre-release.
+- Pushing a version tag such as `v1.0.0` creates a regular GitHub Release.
 
-> Each CI run generates a fresh debug key, so APKs from different runs have different signatures. Uninstall the previous build before installing a new one.
+To build manually, open **Actions → Build APK → Run workflow** and select the `main` branch.
 
-### Release build
+### Create a signed release build
 
-Signing is configured through environment variables, so keys never live in the repo:
+Release signing is configured through environment variables. Do not commit keystores or passwords to the repository.
+
+The configured key alias is `upload`.
 
 ```bash
-export KEYSTORE_PATH=/secure/path/to/pocketssh-release.jks   # key alias: upload
+export KEYSTORE_PATH=/secure/path/to/your-release-key.jks
 export STORE_PASSWORD="<keystore-password>"
 export KEY_PASSWORD="<key-password>"
 
-gradle :app:assembleRelease   # APK
-gradle :app:bundleRelease     # AAB for Google Play
+# Release APK
+gradle :app:assembleRelease
+
+# Android App Bundle for Google Play
+gradle :app:bundleRelease
 ```
 
-Never commit keystores or passwords. See [`docs/RELEASE_BUILD.md`](docs/RELEASE_BUILD.md) for the pre-release checklist.
+Before publishing, increment `versionCode` and `versionName` in `app/build.gradle.kts`, verify the signing configuration, and run the tests and Android Lint checks.
 
----
+See [Release Build Instructions](docs/RELEASE_BUILD.md) for the release checklist.
 
-## 🗂️ Project structure
+## Technology stack
+
+| Layer | Technology |
+|---|---|
+| Language | Kotlin |
+| UI | Jetpack Compose, Material 3, Navigation Compose |
+| SSH / SFTP | [ConnectBot sshlib](https://github.com/connectbot/cbssh) |
+| Terminal | [ConnectBot termlib](https://github.com/connectbot/termlib) |
+| Local database | Room |
+| Preferences | DataStore |
+| Credential protection | Android Keystore, AES-256-GCM, AndroidX Biometric |
+| Asynchronous work | Kotlin Coroutines and Flow |
+| Serialization | kotlinx.serialization |
+| Build | Gradle Kotlin DSL, version catalog, KSP |
+| Tests | JUnit 4, Robolectric, Compose UI tests |
+
+## Project structure
+
+The Android source is organized by responsibility:
 
 ```text
 app/src/main/java/com/example/
-├── MainActivity.kt, PocketSshApplication.kt
-├── core/        formatters, host-fingerprint utils, network monitor
-├── data/        Room database, entities, DAOs, repositories
-├── domain/      models and enums
-├── profiles/    server list view model
-├── security/    Keystore crypto, credential vault, biometric + PIN lock, encrypted backups
-├── settings/    DataStore preferences and settings view model
-├── sftp/        SFTP manager and view model
-├── ssh/         session manager, host key verifier
-├── terminal/    terminal bridge and view model
-└── ui/          Compose screens, reusable components, theme and design tokens
+├── core/       Shared utilities and network monitoring
+├── data/       Room database, entities, DAOs, repositories
+├── domain/     Domain models and enums
+├── profiles/   Server profile presentation and state
+├── security/   Credential vault, encryption, app lock, backups
+├── settings/   App preferences and settings state
+├── sftp/       SFTP operations and file management
+├── ssh/        SSH sessions and host-key verification
+├── terminal/   Terminal integration and session state
+└── ui/         Compose screens, components, and theme
 ```
 
----
+## Documentation
 
-## 📚 Documentation
-
-| Document | What's inside |
+| Document | Description |
 |---|---|
-| [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) | Data storage, host-key verification, crypto policy, device hardening |
-| [`docs/RELEASE_BUILD.md`](docs/RELEASE_BUILD.md) | Debug and release builds, signing, pre-release checklist |
-| [`docs/DEPENDENCIES_AND_LICENSES.md`](docs/DEPENDENCIES_AND_LICENSES.md) | Pinned dependencies, licenses, evaluation notes |
+| [Security Architecture](docs/SECURITY_ARCHITECTURE.md) | Credential storage, host-key verification, cryptography, and device security |
+| [Release Build Instructions](docs/RELEASE_BUILD.md) | Debug and release builds, signing, and pre-release checklist |
+| [Dependencies and Licenses](docs/DEPENDENCIES_AND_LICENSES.md) | Dependency versions, licenses, and evaluation notes |
 
 ---
 
 <p align="center">
-  Made with Kotlin and Jetpack Compose 🛡️
+  Built with Kotlin and Jetpack Compose.
 </p>
